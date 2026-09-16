@@ -1,0 +1,33 @@
+services:
+  manager:
+    image: ghcr.io/juhunc/private-marketplace-manager:0.1.0
+    restart: unless-stopped
+    user: "${MANAGER_UID:-10001}:${MANAGER_GID:-10001}"
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PUBLIC_URL: "${PUBLIC_URL:?Set PUBLIC_URL to the internal HTTPS origin}"
+      API_TOKEN_FILE: /run/secrets/api_token
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-2147483648}"
+    volumes:
+      - type: bind
+        source: "${EXTENSIONS_HOST_DIR:?Set the existing VSIX directory}"
+        target: /data/extensions
+      - type: bind
+        source: "${STATE_HOST_DIR:?Set a separate manager state directory}"
+        target: /data/state
+    secrets:
+      - api_token
+      - admin_password
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 128
+secrets:
+  api_token:
+    file: ./secrets/api-token.txt
+  admin_password:
+    file: ./secrets/admin-password.txt

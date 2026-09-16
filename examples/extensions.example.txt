@@ -1,0 +1,3 @@
+# One publisher.extension identifier per line. Edit freely between runs.
+# Example (uncomment only if wanted):
+# ms-vscode.hexeditor

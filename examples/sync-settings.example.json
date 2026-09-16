@@ -1,0 +1,8 @@
+{
+  "serverUrl": "https://marketplace-manager.example.internal",
+  "tokenFile": "api-token.txt",
+  "workDir": "work",
+  "concurrency": 2,
+  "maxDownloadBytes": 2147483648,
+  "retries": 4
+}

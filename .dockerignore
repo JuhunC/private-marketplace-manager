@@ -1,0 +1,10 @@
+.git
+bin
+dist
+work
+data
+secrets
+.env
+sync-settings.json
+extensions.txt
+*.log

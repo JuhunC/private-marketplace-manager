@@ -1,0 +1,390 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Private Marketplace Manager",
+    "version": "1.0",
+    "description": "Synchronous authenticated VSIX storage. See /guide.html for deployment and usage."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "marketplace_session"
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/status": {
+      "get": {
+        "summary": "Service status",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        }
+      }
+    },
+    "/api/v1/extensions": {
+      "get": {
+        "summary": "Paginated package inventory",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "Validate and durably store raw VSIX bytes",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "platform",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Content-SHA256",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Package-Source",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Identical content already stored"
+          },
+          "201": {
+            "description": "Validated file durably stored"
+          },
+          "409": {
+            "description": "Identity or idempotency conflict"
+          },
+          "413": {
+            "description": "Upload too large"
+          },
+          "422": {
+            "description": "Validation failed"
+          },
+          "429": {
+            "description": "Busy"
+          },
+          "507": {
+            "description": "Storage operation failed"
+          }
+        }
+      }
+    },
+    "/api/v1/extensions/check": {
+      "post": {
+        "summary": "Check up to 1000 package keys",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "keys"
+                ],
+                "properties": {
+                  "keys": {
+                    "type": "array",
+                    "maxItems": 1000,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/packages/download": {
+      "get": {
+        "summary": "Download original VSIX",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/uploads/by-key/{key}": {
+      "get": {
+        "summary": "Find an upload receipt",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/audit-events": {
+      "get": {
+        "summary": "Recent audit events",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        }
+      }
+    },
+    "/api/v1/sync-runs": {
+      "get": {
+        "summary": "Recent sync reports",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        }
+      },
+      "post": {
+        "summary": "Save client-reported run summary",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved"
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "summary": "Current session",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        }
+      }
+    },
+    "/api/v1/logout": {
+      "post": {
+        "summary": "End browser session",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        }
+      }
+    },
+    "/api/v1/login": {
+      "post": {
+        "security": [],
+        "summary": "Operator login; Origin must equal PUBLIC_URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "password"
+                ],
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "format": "password"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session cookie and CSRF token"
+          },
+          "401": {
+            "description": "Invalid password"
+          },
+          "403": {
+            "description": "Wrong origin"
+          },
+          "429": {
+            "description": "Too many attempts"
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "security": [],
+        "summary": "live health",
+        "responses": {
+          "200": {
+            "description": "Healthy"
+          },
+          "503": {
+            "description": "Not ready"
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "security": [],
+        "summary": "ready health",
+        "responses": {
+          "200": {
+            "description": "Healthy"
+          },
+          "503": {
+            "description": "Not ready"
+          }
+        }
+      }
+    }
+  }
+}

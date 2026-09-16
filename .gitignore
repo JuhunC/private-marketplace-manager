@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/data/
+/secrets/
+/work/
+*.log
+.env
+sync-settings.json
+extensions.txt
+.DS_Store
