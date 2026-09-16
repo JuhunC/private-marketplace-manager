@@ -29,7 +29,9 @@ try:
     assert status==201 and result['package']['status']=='stored',result
     status,result=request('/api/v1/extensions',b.getvalue())
     assert status==200 and result['duplicate'],result
-    docker('restart','--time','5',name);ready()
+    docker('restart','--time','5',name)
+    port=docker('port',name,'8080/tcp').rsplit(':',1)[1]
+    ready()
     status,result=request('/api/v1/extensions')
     assert result['total']==1 and result['packages'][0]['status']=='stored',result
     print('Container smoke passed: non-root startup, durable upload, duplicate retry, restart reconciliation.')
