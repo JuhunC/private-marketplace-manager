@@ -1,10 +1,14 @@
+name: "${COMPOSE_PROJECT_NAME:-private-marketplace-manager}"
+
 services:
   manager:
-    image: ghcr.io/juhunc/private-marketplace-manager:0.1.0
-    restart: unless-stopped
+    image: "${MANAGER_IMAGE:-ghcr.io/juhunc/private-marketplace-manager:0.1.0}"
+    container_name: "${MANAGER_CONTAINER_NAME:-private-marketplace-manager}"
+    restart: "${RESTART_POLICY:-unless-stopped}"
+    init: true
     user: "${MANAGER_UID:-10001}:${MANAGER_GID:-10001}"
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${MANAGER_BIND_ADDRESS:-127.0.0.1}:${MANAGER_HOST_PORT:-8080}:8080"
     environment:
       PUBLIC_URL: "${PUBLIC_URL:?Set PUBLIC_URL to the internal HTTPS origin}"
       API_TOKEN_FILE: /run/secrets/api_token
@@ -14,20 +18,30 @@ services:
       - type: bind
         source: "${EXTENSIONS_HOST_DIR:?Set the existing VSIX directory}"
         target: /data/extensions
+        bind:
+          create_host_path: false
       - type: bind
         source: "${STATE_HOST_DIR:?Set a separate manager state directory}"
         target: /data/state
+        bind:
+          create_host_path: false
     secrets:
       - api_token
       - admin_password
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: 1g
-    cpus: 2
-    pids_limit: 128
+    mem_limit: "${MEMORY_LIMIT:-1g}"
+    cpus: "${CPU_LIMIT:-2}"
+    pids_limit: "${PIDS_LIMIT:-128}"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-5}"
 secrets:
   api_token:
-    file: ./secrets/api-token.txt
+    file: "${API_TOKEN_SECRET_FILE:-./secrets/api-token.txt}"
   admin_password:
-    file: ./secrets/admin-password.txt
+    file: "${ADMIN_PASSWORD_SECRET_FILE:-./secrets/admin-password.txt}"

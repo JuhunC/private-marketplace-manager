@@ -10,19 +10,74 @@ Grant the manager container account write access to both directories using your 
 
 ## 2. Configure secrets and Compose
 
-Copy `deploy/compose.yaml` and `.env.example` to an operator-managed deployment directory. Rename `.env.example` to `.env` and replace all placeholders. Create `secrets/api-token.txt` and `secrets/admin-password.txt` using independent random values. Use at least 32 characters for the token and 12 for the password. Restrict secret files while ensuring the container's UID can read them; local Compose bind-mounted secret ownership is governed by host permissions.
+Copy the entire `deploy/` directory to an operator-managed location such as
+`/opt/private-marketplace-manager`. The included `.env.example` contains a
+concrete Linux example with every Compose input. Generate secrets and the state
+directory before starting:
+
+```sh
+cd /opt/private-marketplace-manager
+cp .env.example .env
+chmod 600 .env
+
+install -d -m 0700 secrets
+umask 077
+openssl rand -hex 32 > secrets/api-token.txt
+openssl rand -base64 24 > secrets/admin-password.txt
+
+sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/private-marketplace-manager
+```
+
+Edit `.env` and replace at least `PUBLIC_URL`, `EXTENSIONS_HOST_DIR`, and
+`STATE_HOST_DIR`. Change `MANAGER_UID`/`MANAGER_GID` if `10001:10001` does not
+have read/write access to both host directories. The secret values must remain
+independent: the API token is used by `marketplace-sync`; the password is used
+only for browser login. Use at least 32 characters for the token and 12 for the
+password. Local Compose bind-mounted secret ownership is governed by host
+permissions.
 
 Do not commit `.env` or secrets. `PUBLIC_URL` must be the browser's exact HTTPS origin, including a non-default port if used. It must not contain a path.
 
 ```sh
+docker compose --env-file .env config
 docker compose --env-file .env pull
 docker compose --env-file .env up -d
-docker compose logs --tail 100 manager
+docker compose --env-file .env ps
+docker compose --env-file .env logs --tail 100 manager
+curl --fail http://127.0.0.1:8080/health/ready
 ```
 
-The example exposes only `127.0.0.1:8080` for a TLS reverse proxy on the same host. For a containerized proxy, attach the manager to its private Docker network instead. Use your approved internal certificate. Configure proxy upload size/timeouts to accommodate the maximum VSIX (default 2 GiB and up to 30 minutes). Avoid exposing the raw HTTP port outside trusted local/private proxy connections.
+Inspect the rendered `docker compose ... config` output before starting. This
+catches unresolved variables and confirms the exact paths, port, image, user,
+limits, and secret files Docker will use. The bind mounts use
+`create_host_path: false`, so a misspelled host path fails instead of silently
+creating an empty directory.
+
+The example exposes only `127.0.0.1:8080` for a TLS reverse proxy on the same host. A complete Nginx server-block example is provided at `deploy/nginx/private-marketplace-manager.conf.example`; change its server name and internal-PKI certificate paths. For a containerized proxy, attach the manager to its private Docker network instead. Use your approved internal certificate. Configure proxy upload size/timeouts to accommodate the maximum VSIX (default 2 GiB and up to 30 minutes). Avoid exposing the raw HTTP port outside trusted local/private proxy connections.
 
 ## 3. Configuration reference
+
+The `.env` file controls these Compose settings:
+
+| Variable | Example | Purpose |
+|---|---|---|
+| `MANAGER_IMAGE` | `ghcr.io/juhunc/private-marketplace-manager:0.1.0` | Pinned manager image |
+| `PUBLIC_URL` | `https://marketplace-manager.corp.example.com` | Exact browser-facing origin |
+| `MANAGER_BIND_ADDRESS` / `MANAGER_HOST_PORT` | `127.0.0.1` / `8080` | Host listener used by the TLS proxy |
+| `EXTENSIONS_HOST_DIR` | `/srv/vsmarketplace/extensions` | Existing Microsoft marketplace VSIX directory |
+| `STATE_HOST_DIR` | `/var/lib/private-marketplace-manager` | Separate local SQLite state directory |
+| `MANAGER_UID` / `MANAGER_GID` | `10001` / `10001` | Host identity with write access to both directories |
+| `API_TOKEN_SECRET_FILE` | `./secrets/api-token.txt` | Generated sync-client token file |
+| `ADMIN_PASSWORD_SECRET_FILE` | `./secrets/admin-password.txt` | Generated browser password file |
+| `MAX_UPLOAD_BYTES` | `2147483648` | Maximum compressed VSIX bytes |
+| `CPU_LIMIT` / `MEMORY_LIMIT` / `PIDS_LIMIT` | `2` / `1g` / `128` | Container resource limits |
+| `LOG_MAX_SIZE` / `LOG_MAX_FILES` | `10m` / `5` | Docker JSON log rotation |
+
+Other values in `.env.example` control the Compose project/container names and
+restart policy. Relative secret paths resolve from the directory containing
+`compose.yaml`.
+
+The manager receives these application settings from Compose:
 
 | Variable | Default | Purpose |
 |---|---|---|

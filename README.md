@@ -26,7 +26,7 @@ An operator needs to provision the container once with write access to the exist
 docker pull ghcr.io/juhunc/private-marketplace-manager:0.1.0
 ```
 
-Use [`deploy/compose.yaml`](deploy/compose.yaml) and [`deploy/.env.example`](deploy/.env.example). Set the existing extension directory, a separate persistent state directory, and the exact internal HTTPS origin. Supply two secret files: a random API token (32+ characters) and a separate operator password (12+ characters). The container's default UID/GID is `10001:10001`. Bind it behind your internal TLS reverse proxy.
+Use the [ready-to-use Compose deployment](deploy/README.md), including a fully annotated [`.env.example`](deploy/.env.example). Set the existing extension directory, a separate persistent state directory, and the exact internal HTTPS origin. The setup generates a random API token and separate operator password; example credentials are deliberately not committed. The container's default UID/GID is `10001:10001`. Bind it behind your internal TLS reverse proxy.
 
 The web interface includes inventory, version/platform metadata, manual multi-file uploads, sync reports, activity logs, and an embedded guide. It uses a password-protected operator session; the client uses the separate bearer token. No external CDN assets are loaded.
 
