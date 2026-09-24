@@ -54,6 +54,7 @@ type Server struct {
 	passwordHash []byte
 	salt         []byte
 	mu           sync.Mutex
+	maintenance  sync.RWMutex
 	publishMu    sync.Mutex
 	sessions     map[string]session
 	attempts     map[string]attempt
@@ -163,6 +164,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/audit-events", s.auth(s.events))
 	s.mux.HandleFunc("POST /api/v1/sync-runs", s.auth(s.report))
 	s.mux.HandleFunc("GET /api/v1/sync-runs", s.auth(s.runs))
+	s.mux.HandleFunc("POST /api/v1/admin/reconcile", s.auth(s.reconcile))
 	sub, _ := fs.Sub(web, "web")
 	s.mux.Handle("GET /", http.FileServer(http.FS(sub)))
 }
@@ -410,6 +412,8 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
+	s.maintenance.RLock()
+	defer s.maintenance.RUnlock()
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
@@ -570,6 +574,54 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 
 // Reconcile verifies existing files and repairs pending publications. It never removes VSIXs.
 func (s *Server) Reconcile() error {
+	s.maintenance.Lock()
+	defer s.maintenance.Unlock()
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	return s.reconcileStorage()
+}
+
+func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
+	before, e := s.db.All()
+	if e != nil {
+		fail(w, 500, "database", "inventory unavailable")
+		return
+	}
+	if e = s.Reconcile(); e != nil {
+		_ = s.db.Audit(actor(r), "reconcile_failed", e.Error())
+		fail(w, 500, "reconcile_failed", "storage reconciliation failed")
+		return
+	}
+	after, e := s.db.All()
+	if e != nil {
+		fail(w, 500, "database", "inventory unavailable after reconciliation")
+		return
+	}
+	beforeStatus := map[string]string{}
+	for _, p := range before {
+		beforeStatus[p.Key()] = p.Status
+	}
+	changed := 0
+	for _, p := range after {
+		if status, ok := beforeStatus[p.Key()]; !ok || status != p.Status {
+			changed++
+		}
+	}
+	counts := map[string]int{}
+	for _, p := range after {
+		counts[p.Status]++
+	}
+	detail, _ := json.Marshal(map[string]any{"changed": changed, "counts": counts})
+	_ = s.db.Audit(actor(r), "reconciled", string(detail))
+	jsonResponse(w, 200, map[string]any{
+		"ok":           true,
+		"changed":      changed,
+		"statusCounts": counts,
+		"reconciledAt": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) reconcileStorage() error {
 	entries, e := os.ReadDir(s.cfg.Extensions)
 	if e != nil {
 		return e

@@ -293,6 +293,22 @@
         }
       }
     },
+    "/api/v1/admin/reconcile": {
+      "post": {
+        "summary": "Reconcile the VSIX directory and durable inventory",
+        "responses": {
+          "200": {
+            "description": "Reconciliation complete"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "500": {
+            "description": "Storage or database reconciliation failed"
+          }
+        }
+      }
+    },
     "/api/v1/me": {
       "get": {
         "summary": "Current session",

@@ -2,7 +2,7 @@ name: "${COMPOSE_PROJECT_NAME:-private-marketplace-manager}"
 
 services:
   manager:
-    image: "${MANAGER_IMAGE:-ghcr.io/juhunc/private-marketplace-manager:0.1.0}"
+    image: "${MANAGER_IMAGE:-ghcr.io/juhunc/private-marketplace-manager:0.2.0}"
     container_name: "${MANAGER_CONTAINER_NAME:-private-marketplace-manager}"
     restart: "${RESTART_POLICY:-unless-stopped}"
     init: true

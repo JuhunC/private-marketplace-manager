@@ -40,7 +40,7 @@ Successful response:
 }
 ```
 
-`201` means newly stored; `200` means the identical package already exists. Both are synchronous durable acknowledgements. No `202`/background-upload polling is required in v0.1.0. If the connection fails after publication, retry the same bytes/key. The manager verifies the existing file and returns its receipt. An idempotency key cannot be reused for another identity/hash.
+`201` means newly stored; `200` means the identical package already exists. Both are synchronous durable acknowledgements. No `202`/background-upload polling is required. If the connection fails after publication, retry the same bytes/key. The manager verifies the existing file and returns its receipt. An idempotency key cannot be reused for another identity/hash.
 
 ## Endpoints
 
@@ -55,6 +55,7 @@ Successful response:
 | `GET /audit-events` | Latest 100 audit events |
 | `POST /sync-runs` | Save/update a JSON report with a run `id`; max 4 MiB |
 | `GET /sync-runs` | Latest 100 client-reported runs |
+| `POST /admin/reconcile` | Rescan storage, recover pending records, inventory valid external files, and mark absent records missing |
 | `POST /login` | Browser operator password login; matching Origin required |
 | `GET /me` | Session CSRF token and server version |
 | `POST /logout` | End browser session; matching Origin and CSRF header required |
@@ -68,6 +69,8 @@ Batch lookup example:
 Response: `{"packages":{"<key>":{...package metadata...}}}`. Absent, missing, or conflicting packages are not returned. Lightweight lookup checks presence/type/size, not the entire file hash. Restart reconciliation rehashes existing files. Avoid out-of-band changes.
 
 Health endpoints `/health/live` and `/health/ready` are outside `/api/v1` and require no credentials. No endpoint accepts an arbitrary destination path, downloads arbitrary remote URLs, executes commands, or deletes VSIX files.
+
+`POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never deletes VSIX files or chooses between conflicting bytes. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records and counts by status.
 
 ## Errors and retry policy
 

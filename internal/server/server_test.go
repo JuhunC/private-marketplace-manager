@@ -223,3 +223,39 @@ func TestCheckDoesNotSkipMissingFile(t *testing.T) {
 		t.Fatal("missing file skipped")
 	}
 }
+
+func TestAdminReconcileRepairsMissingAndInventoriesNewFiles(t *testing.T) {
+	_, h, c := setup(t)
+	first := testutil.VSIX("hello", "1.0.0", "", false, nil)
+	if code, _ := upload(t, h, first, "first"); code != 201 {
+		t.Fatal(code)
+	}
+	if e := os.Remove(filepath.Join(c.Extensions, "test.hello-1.0.0-universal.vsix")); e != nil {
+		t.Fatal(e)
+	}
+	second := testutil.VSIX("other", "2.0.0", "linux-x64", false, nil)
+	if e := os.WriteFile(filepath.Join(c.Extensions, "external.vsix"), second, 0644); e != nil {
+		t.Fatal(e)
+	}
+	r := request(t, h, "POST", "/api/v1/admin/reconcile", nil, map[string]string{"Authorization": "Bearer " + testToken})
+	defer r.Body.Close()
+	if r.StatusCode != 200 {
+		body, _ := io.ReadAll(r.Body)
+		t.Fatalf("reconcile: %d %s", r.StatusCode, body)
+	}
+	var result struct {
+		Changed int            `json:"changed"`
+		Counts  map[string]int `json:"statusCounts"`
+	}
+	if e := json.NewDecoder(r.Body).Decode(&result); e != nil {
+		t.Fatal(e)
+	}
+	if result.Changed != 2 || result.Counts["stored"] != 1 || result.Counts["missing"] != 1 {
+		t.Fatalf("unexpected reconcile result: %+v", result)
+	}
+	r = request(t, h, "POST", "/api/v1/admin/reconcile", nil, nil)
+	r.Body.Close()
+	if r.StatusCode != 401 {
+		t.Fatalf("unauthenticated reconcile: %d", r.StatusCode)
+	}
+}
