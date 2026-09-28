@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -225,6 +226,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/me", s.auth(s.me))
 	s.mux.HandleFunc("POST /api/v1/logout", s.auth(s.logout))
 	s.mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
+	s.mux.HandleFunc("GET /api/v1/catalog", s.auth(s.afterScan(s.catalog)))
+	s.mux.HandleFunc("GET /api/v1/catalog/{id}", s.auth(s.afterScan(s.catalogEntry)))
 	s.mux.HandleFunc("GET /api/v1/extensions", s.auth(s.afterScan(s.list)))
 	s.mux.HandleFunc("POST /api/v1/extensions", s.auth(s.afterScan(s.upload)))
 	s.mux.HandleFunc("POST /api/v1/extensions/check", s.auth(s.afterScan(s.check)))
@@ -392,9 +395,11 @@ func actor(r *http.Request) string {
 	}
 	return "operator"
 }
-func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+// page reads limit (default 100, at most 500) and offset query parameters.
+func page(r *http.Request) (limit, offset int) {
+	limit, _ = strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ = strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {
 		limit = 100
 	}
@@ -404,12 +409,77 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
+	return limit, offset
+}
+func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+	limit, offset := page(r)
 	p, total, e := s.db.List(strings.ToLower(r.URL.Query().Get("id")), limit, offset)
 	if e != nil {
 		fail(w, 500, "database", "inventory unavailable")
 		return
 	}
 	jsonResponse(w, 200, map[string]any{"packages": p, "total": total, "limit": limit, "offset": offset})
+}
+func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	switch q.Get("sort") {
+	case "", "name", "versions", "size", "updated":
+	default:
+		fail(w, 400, "bad_request", "sort must be name, versions, size, or updated")
+		return
+	}
+	limit, offset := page(r)
+	x, total, e := s.db.Catalog(store.CatalogQuery{Search: strings.TrimSpace(q.Get("q")), Sort: q.Get("sort"), Attention: q.Get("attention") == "true", Limit: limit, Offset: offset})
+	if e != nil {
+		fail(w, 500, "database", "catalog unavailable")
+		return
+	}
+	jsonResponse(w, 200, map[string]any{"extensions": x, "total": total, "limit": limit, "offset": offset})
+}
+
+// versionGroup collects the platform packages published for one extension version.
+type versionGroup struct {
+	Version    string         `json:"version"`
+	Prerelease bool           `json:"prerelease"`
+	Bytes      int64          `json:"bytes"`
+	StoredAt   string         `json:"storedAt,omitempty"`
+	Packages   []vsix.Package `json:"packages"`
+}
+
+func (s *Server) catalogEntry(w http.ResponseWriter, r *http.Request) {
+	id := strings.ToLower(r.PathValue("id"))
+	x, _, e := s.db.Catalog(store.CatalogQuery{ID: id, Limit: 1})
+	if e != nil {
+		fail(w, 500, "database", "catalog unavailable")
+		return
+	}
+	if len(x) == 0 {
+		fail(w, 404, "not_found", "extension not found")
+		return
+	}
+	p, _, e := s.db.List(id, 2147483647, 0)
+	if e != nil {
+		fail(w, 500, "database", "inventory unavailable")
+		return
+	}
+	versions := []*versionGroup{}
+	byVersion := map[string]*versionGroup{}
+	for _, pkg := range p {
+		v := byVersion[pkg.Version]
+		if v == nil {
+			v = &versionGroup{Version: pkg.Version}
+			byVersion[pkg.Version] = v
+			versions = append(versions, v)
+		}
+		v.Prerelease = v.Prerelease || pkg.Prerelease
+		if pkg.Status == "stored" {
+			v.Bytes += pkg.Size
+		}
+		v.StoredAt = max(v.StoredAt, pkg.StoredAt)
+		v.Packages = append(v.Packages, pkg)
+	}
+	sort.Slice(versions, func(i, j int) bool { return vsix.CompareVersions(versions[i].Version, versions[j].Version) > 0 })
+	jsonResponse(w, 200, map[string]any{"extension": x[0], "versions": versions})
 }
 func (s *Server) check(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -432,15 +502,8 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, map[string]any{"packages": out})
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	var n, bytes int64
-	_ = s.db.DB.QueryRow(`SELECT count(*) FROM packages WHERE status='stored'`).Scan(&n)
-	p, _, _ := s.db.List("", 2147483647, 0)
-	for _, v := range p {
-		if v.Status == "stored" {
-			bytes += v.Size
-		}
-	}
-	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "packages": n, "bytes": bytes, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 1, "inventory": s.scanState()})
+	t, _ := s.db.Totals()
+	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "extensions": t.Extensions, "versions": t.Versions, "packages": t.Packages, "bytes": t.Bytes, "attention": t.Attention, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 1, "inventory": s.scanState()})
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	v, e := s.db.Events()

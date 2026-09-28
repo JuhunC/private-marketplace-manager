@@ -34,10 +34,105 @@
         "summary": "Service status",
         "responses": {
           "200": {
-            "description": "Success, including startup inventory scan progress in `inventory`"
+            "description": "Success: stored extension, version, package, and byte totals, records needing attention, and startup inventory scan progress in `inventory`"
           },
           "401": {
             "description": "Invalid credential"
+          }
+        }
+      }
+    },
+    "/api/v1/catalog": {
+      "get": {
+        "summary": "Extensions grouped by ID with version, platform, package, size, and status counts",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Part of an extension ID or display name"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "name",
+                "versions",
+                "size",
+                "updated"
+              ]
+            }
+          },
+          {
+            "name": "attention",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Only extensions with missing, pending, or conflicting records"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Page size, at most 500"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Zero-based offset"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Unknown sort"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/{id}": {
+      "get": {
+        "summary": "One extension with its versions, newest first, and their platform packages",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "404": {
+            "description": "Extension not found"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
           }
         }
       }

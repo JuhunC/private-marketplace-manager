@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/JuhunC/private-marketplace-manager/internal/vsix"
@@ -85,6 +87,118 @@ func (s *Store) List(id string, limit, offset int) ([]vsix.Package, int, error) 
 	return out, total, rows.Err()
 }
 func (s *Store) All() ([]vsix.Package, error) { p, _, e := s.List("", 2147483647, 0); return p, e }
+
+// Totals counts stored content and the package records that need attention.
+type Totals struct {
+	Extensions int   `json:"extensions"`
+	Versions   int   `json:"versions"`
+	Packages   int   `json:"packages"`
+	Bytes      int64 `json:"bytes"`
+	Attention  int   `json:"attention"`
+}
+
+func (s *Store) Totals() (Totals, error) {
+	var t Totals
+	e := s.DB.QueryRow(`SELECT count(DISTINCT CASE WHEN status='stored' THEN id END), count(DISTINCT CASE WHEN status='stored' THEN id||'@'||version END),
+	 coalesce(sum(status='stored'),0), coalesce(sum(CASE WHEN status='stored' THEN json_extract(payload,'$.size') END),0), coalesce(sum(status<>'stored'),0) FROM packages`).Scan(&t.Extensions, &t.Versions, &t.Packages, &t.Bytes, &t.Attention)
+	return t, e
+}
+
+// Extension summarizes every package record that shares an extension ID.
+type Extension struct {
+	ID            string         `json:"id"`
+	DisplayName   string         `json:"displayName"`
+	LatestVersion string         `json:"latestVersion"`
+	Versions      int            `json:"versions"`
+	Platforms     []string       `json:"platforms"`
+	Packages      int            `json:"packages"`
+	Bytes         int64          `json:"bytes"`
+	UpdatedAt     string         `json:"updatedAt,omitempty"`
+	StatusCounts  map[string]int `json:"statusCounts"`
+}
+
+// CatalogQuery selects extension summaries. ID matches exactly; Search matches part of an ID or display name.
+type CatalogQuery struct {
+	ID, Search    string
+	Sort          string // name, versions, size, or updated
+	Attention     bool   // only extensions with records that are not stored
+	Limit, Offset int
+}
+
+var catalogOrder = map[string]string{"name": "id", "versions": "versions DESC, id", "size": "bytes DESC, id", "updated": "updated DESC, id"}
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func (s *Store) Catalog(q CatalogQuery) ([]Extension, int, error) {
+	order, ok := catalogOrder[q.Sort]
+	if !ok {
+		order = catalogOrder["name"]
+	}
+	where, args := "", []any{}
+	if q.ID != "" {
+		where, args = " WHERE id=?", append(args, q.ID)
+	} else if q.Search != "" {
+		// Select whole extensions, so versions whose display name differs still count.
+		pattern := "%" + likeEscaper.Replace(q.Search) + "%"
+		where = ` WHERE id IN (SELECT id FROM packages WHERE id LIKE ? ESCAPE '\' OR json_extract(payload,'$.displayName') LIKE ? ESCAPE '\')`
+		args = append(args, pattern, pattern)
+	}
+	having := ""
+	if q.Attention {
+		having = " HAVING sum(status<>'stored')>0"
+	}
+	groups := `SELECT id, count(DISTINCT version) AS versions, count(*) AS packages,
+	 coalesce(sum(CASE WHEN status='stored' THEN json_extract(payload,'$.size') END),0) AS bytes,
+	 coalesce(max(json_extract(payload,'$.storedAt')),'') AS updated, group_concat(DISTINCT platform) FROM packages` + where + " GROUP BY id" + having
+	var total int
+	if e := s.DB.QueryRow("SELECT count(*) FROM ("+groups+")", args...).Scan(&total); e != nil {
+		return nil, 0, e
+	}
+	rows, e := s.DB.Query(groups+" ORDER BY "+order+" LIMIT ? OFFSET ?", append(args, q.Limit, q.Offset)...)
+	if e != nil {
+		return nil, 0, e
+	}
+	out := []Extension{}
+	index := map[string]int{}
+	for rows.Next() {
+		var x Extension
+		var platforms string
+		if e = rows.Scan(&x.ID, &x.Versions, &x.Packages, &x.Bytes, &x.UpdatedAt, &platforms); e != nil {
+			rows.Close()
+			return nil, 0, e
+		}
+		x.Platforms = strings.Split(platforms, ",")
+		sort.Strings(x.Platforms)
+		x.StatusCounts = map[string]int{}
+		index[x.ID] = len(out)
+		out = append(out, x)
+	}
+	rows.Close()
+	if e = rows.Err(); e != nil || len(out) == 0 {
+		return out, total, e
+	}
+	// Latest version and statuses need semantic version order, which SQL cannot provide.
+	ids := make([]any, 0, len(out))
+	for _, x := range out {
+		ids = append(ids, x.ID)
+	}
+	rows, e = s.DB.Query(`SELECT id, version, status, coalesce(json_extract(payload,'$.displayName'),'') FROM packages WHERE id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, ids...)
+	if e != nil {
+		return nil, 0, e
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, version, status, name string
+		if e = rows.Scan(&id, &version, &status, &name); e != nil {
+			return nil, 0, e
+		}
+		x := &out[index[id]]
+		x.StatusCounts[status]++
+		if x.LatestVersion == "" || vsix.CompareVersions(version, x.LatestVersion) > 0 {
+			x.LatestVersion, x.DisplayName = version, name
+		}
+	}
+	return out, total, rows.Err()
+}
 func (s *Store) Upload(key, sha, pkg string) error {
 	_, e := s.DB.Exec(`INSERT INTO uploads VALUES(?,?,?) ON CONFLICT(key) DO NOTHING`, key, sha, pkg)
 	return e

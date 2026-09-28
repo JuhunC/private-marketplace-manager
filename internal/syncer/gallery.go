@@ -13,7 +13,6 @@ import (
 
 	"github.com/JuhunC/private-marketplace-manager/internal/netutil"
 	"github.com/JuhunC/private-marketplace-manager/internal/vsix"
-	"golang.org/x/mod/semver"
 )
 
 const GalleryURL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
@@ -145,7 +144,7 @@ func (g Gallery) Discover(ctx context.Context, id string) ([]Artifact, error) {
 		return nil, fmt.Errorf("extension %s has no discoverable packages (unknown, unpublished, or unavailable)", id)
 	}
 	sort.Slice(result, func(i, j int) bool {
-		cmp := semver.Compare("v"+result[i].Version, "v"+result[j].Version)
+		cmp := vsix.CompareVersions(result[i].Version, result[j].Version)
 		if cmp != 0 {
 			return cmp < 0
 		}

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"github.com/JuhunC/private-marketplace-manager/internal/testutil"
 	"github.com/JuhunC/private-marketplace-manager/internal/vsix"
 	"io"
@@ -352,5 +353,95 @@ func TestFailedStartupScanRecoversThroughReconcile(t *testing.T) {
 	}
 	if code, _ := getJSON(t, h, "/api/v1/extensions", auth); code != 200 {
 		t.Fatalf("inventory after reconcile: %d", code)
+	}
+}
+
+func TestCatalogGroupsVersionsPerExtension(t *testing.T) {
+	s, h, c := setup(t)
+	for i, pkg := range []struct {
+		name, version, platform string
+		prerelease              bool
+	}{
+		{"hello", "1.9.0", "", false},
+		{"hello", "1.10.0", "linux-x64", false},
+		{"hello", "1.10.0", "darwin-arm64", false},
+		{"hello", "2.0.0", "", true},
+		{"other", "0.1.0", "", false},
+	} {
+		if code, v := upload(t, h, testutil.VSIX(pkg.name, pkg.version, pkg.platform, pkg.prerelease, nil), fmt.Sprint(i)); code != 201 {
+			t.Fatalf("seed %v: %d %v", pkg, code, v)
+		}
+	}
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	catalog := func(query string) (int, []map[string]any, float64) {
+		t.Helper()
+		code, body := getJSON(t, h, "/api/v1/catalog"+query, auth)
+		list, _ := body["extensions"].([]any)
+		out := []map[string]any{}
+		for _, x := range list {
+			out = append(out, x.(map[string]any))
+		}
+		total, _ := body["total"].(float64)
+		return code, out, total
+	}
+	code, list, total := catalog("")
+	if code != 200 || total != 2 || len(list) != 2 {
+		t.Fatalf("catalog: %d %v", code, list)
+	}
+	hello := list[0]
+	if hello["id"] != "test.hello" || hello["latestVersion"] != "2.0.0" || hello["versions"] != float64(3) || hello["packages"] != float64(4) || hello["displayName"] != "Test extension" {
+		t.Fatalf("hello summary: %v", hello)
+	}
+	if fmt.Sprint(hello["platforms"]) != "[darwin-arm64 linux-x64 universal]" || hello["statusCounts"].(map[string]any)["stored"] != float64(4) || hello["bytes"].(float64) <= 0 {
+		t.Fatalf("hello platforms/status: %v", hello)
+	}
+	if _, list, _ = catalog("?sort=versions"); list[0]["id"] != "test.hello" {
+		t.Fatalf("sort by versions: %v", list)
+	}
+	if _, list, _ = catalog("?q=OTH"); len(list) != 1 || list[0]["id"] != "test.other" {
+		t.Fatalf("search by ID: %v", list)
+	}
+	if _, list, _ = catalog("?q=test+extension"); len(list) != 2 {
+		t.Fatalf("search by display name: %v", list)
+	}
+	if _, list, _ = catalog("?q=%25"); len(list) != 0 {
+		t.Fatalf("LIKE wildcard was not escaped: %v", list)
+	}
+	if _, list, total = catalog("?limit=1&offset=1"); total != 2 || len(list) != 1 || list[0]["id"] != "test.other" {
+		t.Fatalf("pagination: %v", list)
+	}
+	if code, _, _ = catalog("?sort=random"); code != 400 {
+		t.Fatalf("unknown sort: %d", code)
+	}
+	code, detail := getJSON(t, h, "/api/v1/catalog/TEST.HELLO", auth)
+	versions, _ := detail["versions"].([]any)
+	if code != 200 || len(versions) != 3 {
+		t.Fatalf("detail: %d %v", code, detail)
+	}
+	order := []string{}
+	for _, v := range versions {
+		order = append(order, v.(map[string]any)["version"].(string))
+	}
+	if strings.Join(order, " ") != "2.0.0 1.10.0 1.9.0" {
+		t.Fatalf("versions are not newest first: %v", order)
+	}
+	if v := versions[1].(map[string]any); len(v["packages"].([]any)) != 2 || v["prerelease"] != false || versions[0].(map[string]any)["prerelease"] != true {
+		t.Fatalf("version grouping: %v", versions)
+	}
+	if code, _ = getJSON(t, h, "/api/v1/catalog/test.absent", auth); code != 404 {
+		t.Fatalf("absent extension: %d", code)
+	}
+	if e := os.Remove(filepath.Join(c.Extensions, "test.other-0.1.0-universal.vsix")); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Reconcile(nil); e != nil {
+		t.Fatal(e)
+	}
+	if _, list, _ = catalog("?attention=true"); len(list) != 1 || list[0]["id"] != "test.other" || list[0]["statusCounts"].(map[string]any)["missing"] != float64(1) {
+		t.Fatalf("attention filter: %v", list)
+	}
+	_, status := getJSON(t, h, "/api/v1/status", auth)
+	if status["extensions"] != float64(1) || status["versions"] != float64(3) || status["packages"] != float64(4) || status["attention"] != float64(1) {
+		t.Fatalf("status totals: %v", status)
 	}
 }

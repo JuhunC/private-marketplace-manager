@@ -46,7 +46,9 @@ Successful response:
 
 | Method and path | Purpose |
 |---|---|
-| `GET /status` | API version, package count, total bytes, upload limit, startup scan progress (`inventory`) |
+| `GET /status` | API version; stored `extensions`, `versions`, `packages`, and `bytes`; `attention` (records not stored); upload limit; startup scan progress (`inventory`) |
+| `GET /catalog?q=python&sort=versions&attention=true&limit=100&offset=0` | One entry per extension: latest version, version/platform/package counts, stored bytes, last update, and status counts. `q` matches part of an ID or display name; `sort` is `name`, `versions`, `size`, or `updated`; `attention=true` keeps extensions with missing, pending, or conflicting records |
+| `GET /catalog/{id}` | One extension's summary plus its versions, newest first by semantic version, each with its platform packages |
 | `GET /extensions?limit=100&offset=0&id=publisher.extension` | Inventory, exact ID filter, max page size 500 |
 | `POST /extensions/check` | Lookup up to 1,000 package keys; only stored regular files of the expected size are returned |
 | `POST /extensions` | Raw-byte VSIX upload |
@@ -80,7 +82,7 @@ After every start the manager scans and hashes the VSIX directory in the backgro
 {"state":"scanning","scanned":1200,"total":5000,"startedAt":"2026-09-28T06:00:00Z"}
 ```
 
-`state` becomes `ready` when the scan finishes, or `failed` with an `error`. Until it is `ready`, `GET /extensions`, `POST /extensions`, `POST /extensions/check`, `GET /packages/download`, and `GET /uploads/by-key/{key}` answer 503: code `starting` with `Retry-After` during the scan, `scan_failed` after a failure. `POST /admin/reconcile` answers 503 `starting` during the scan; after a failure it retries the scan, and success lifts the restriction. Status, login, audit events, and sync reports stay available. `/health/ready` returns 200 `{"status":"starting"}` during the scan, `{"status":"ready"}` after it, and 503 if it failed.
+`state` becomes `ready` when the scan finishes, or `failed` with an `error`. Until it is `ready`, `GET /catalog`, `GET /catalog/{id}`, `GET /extensions`, `POST /extensions`, `POST /extensions/check`, `GET /packages/download`, and `GET /uploads/by-key/{key}` answer 503: code `starting` with `Retry-After` during the scan, `scan_failed` after a failure. `POST /admin/reconcile` answers 503 `starting` during the scan; after a failure it retries the scan, and success lifts the restriction. Status, login, audit events, and sync reports stay available. `/health/ready` returns 200 `{"status":"starting"}` during the scan, `{"status":"ready"}` after it, and 503 if it failed.
 
 ## Errors and retry policy
 

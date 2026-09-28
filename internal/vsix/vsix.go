@@ -13,6 +13,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"golang.org/x/mod/semver"
 )
 
 var component = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
@@ -47,6 +49,9 @@ func ValidIdentity(id, version, platform string) bool {
 	return ValidID(id) && versionRE.MatchString(version) && platformRE.MatchString(platform)
 }
 func (p Package) Key() string { return strings.ToLower(p.ID) + "@" + p.Version + "@" + p.Platform }
+
+// CompareVersions orders extension versions semantically, so 1.10.0 follows 1.9.0.
+func CompareVersions(a, b string) int { return semver.Compare("v"+a, "v"+b) }
 func (p Package) CanonicalName() string {
 	return strings.ToLower(p.ID) + "-" + p.Version + "-" + p.Platform + ".vsix"
 }

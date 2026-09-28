@@ -80,6 +80,6 @@ the configured size. Tool output never contains the API token.
    delete, quarantine, or select a winner.
 
 The manager API token currently grants inventory, report, upload, and reconcile
-access. v0.3.0 does not provide per-tool roles. Run the MCP server only for
+access. v0.4.0 does not provide per-tool roles. Run the MCP server only for
 trusted administrators, keep human approval enabled in the MCP host, and rotate
 the API token when retiring a workstation.
