@@ -26,6 +26,10 @@ type CheckInput struct {
 	Keys []string `json:"keys" jsonschema:"one to 1000 package keys in id@version@platform form"`
 }
 
+type ReconcileInput struct {
+	FullVerify bool `json:"fullVerify,omitempty" jsonschema:"rehash every VSIX instead of only new or changed files; slow for large libraries"`
+}
+
 type UploadInput struct {
 	Path string `json:"path" jsonschema:"absolute or working-directory-relative path to one local VSIX file"`
 }
@@ -154,10 +158,14 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "manager_reconcile_storage", Title: "Reconcile storage inventory", Annotations: additive("Reconcile storage inventory"),
-		Description: "Rescan the designated VSIX directory, inventory valid external files, recover pending publications, and mark absent records missing. It never deletes VSIX files or resolves different-byte conflicts.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+		Description: "Rescan the designated VSIX directory, inventory valid external files, recover pending publications, and mark absent records missing. Files whose size and modification time are unchanged are trusted; set fullVerify to rehash every file. It never deletes VSIX files or resolves different-byte conflicts.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ReconcileInput) (*mcp.CallToolResult, any, error) {
+		path := "/api/v1/admin/reconcile"
+		if in.FullVerify {
+			path += "?verify=full"
+		}
 		var out map[string]any
-		if e := api.JSON(ctx, http.MethodPost, "/api/v1/admin/reconcile", map[string]any{}, &out); e != nil {
+		if e := api.JSON(ctx, http.MethodPost, path, map[string]any{}, &out); e != nil {
 			return nil, nil, e
 		}
 		return nil, out, nil

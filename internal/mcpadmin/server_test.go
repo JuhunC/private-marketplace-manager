@@ -100,8 +100,12 @@ func TestMCPToolsAnalyzeUploadAndReconcile(t *testing.T) {
 		t.Fatalf("unexpected upload: %+v", upload)
 	}
 	reconcile := callToolJSON(t, ctx, clientSession, "manager_reconcile_storage", nil)
-	if ok, _ := reconcile["ok"].(bool); !ok {
+	if ok, _ := reconcile["ok"].(bool); !ok || reconcile["fullVerify"] != false {
 		t.Fatalf("unexpected reconcile: %+v", reconcile)
+	}
+	reconcile = callToolJSON(t, ctx, clientSession, "manager_reconcile_storage", map[string]any{"fullVerify": true})
+	if ok, _ := reconcile["ok"].(bool); !ok || reconcile["fullVerify"] != true {
+		t.Fatalf("unexpected full reconcile: %+v", reconcile)
 	}
 	list := callToolJSON(t, ctx, clientSession, "manager_inventory", map[string]any{"id": "test.repair"})
 	if total, _ := list["total"].(float64); total != 1 {

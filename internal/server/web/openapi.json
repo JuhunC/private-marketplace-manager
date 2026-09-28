@@ -419,7 +419,20 @@
           "503": {
             "description": "Startup inventory scan still running (`starting`; honor Retry-After). After a failed scan, this call retries it"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "verify",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "full"
+              ]
+            },
+            "description": "Rehash every file instead of only files whose size or modification time changed"
+          }
+        ]
       }
     },
     "/api/v1/me": {

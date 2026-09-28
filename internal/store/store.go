@@ -25,12 +25,19 @@ func Open(dir string) (*Store, error) {
 		return nil, e
 	}
 	db.SetMaxOpenConns(1)
-	_, e = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;
+	// Memory-mapped reads and a 64 MiB page cache keep a scan of millions of files from re-reading pages.
+	_, e = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA cache_size=-65536; PRAGMA mmap_size=1073741824;
  CREATE TABLE IF NOT EXISTS packages (key TEXT PRIMARY KEY, id TEXT NOT NULL, version TEXT NOT NULL, platform TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS packages_id ON packages(id);
  CREATE TABLE IF NOT EXISTS uploads (key TEXT PRIMARY KEY, sha TEXT NOT NULL, package_key TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, updated TEXT NOT NULL, payload TEXT NOT NULL);`)
+ CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, updated TEXT NOT NULL, payload TEXT NOT NULL);
+ -- files remembers each VSIX's size, modification time, and identity (empty key for an invalid file),
+ -- so a scan only reopens files that changed. dirty queues package keys the next scan must settle.
+ CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mtime INTEGER NOT NULL, key TEXT NOT NULL, sha TEXT NOT NULL);
+ CREATE INDEX IF NOT EXISTS files_key ON files(key);
+ CREATE TABLE IF NOT EXISTS dirty (key TEXT PRIMARY KEY);
+ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);`)
 	if e != nil {
 		db.Close()
 		return nil, e
@@ -38,13 +45,91 @@ func Open(dir string) (*Store, error) {
 	return &Store{db}, nil
 }
 func (s *Store) Close() error { return s.DB.Close() }
-func (s *Store) Put(p vsix.Package) error {
+
+// Execer is satisfied by *sql.DB and *sql.Tx.
+type Execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func (s *Store) Put(p vsix.Package) error { return Put(s.DB, p) }
+
+// Put writes a package record through x, which may be a transaction.
+func Put(x Execer, p vsix.Package) error {
 	b, e := json.Marshal(p)
 	if e != nil {
 		return e
 	}
-	_, e = s.DB.Exec(`INSERT INTO packages VALUES(?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET status=excluded.status,payload=excluded.payload`, p.Key(), p.ID, p.Version, p.Platform, p.Status, string(b))
+	_, e = x.Exec(`INSERT INTO packages VALUES(?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET status=excluded.status,payload=excluded.payload`, p.Key(), p.ID, p.Version, p.Platform, p.Status, string(b))
 	return e
+}
+
+// Journal records a publication in progress and queues its key, so the next scan settles it
+// if the process stops before Publish.
+func (s *Store) Journal(p vsix.Package) error {
+	return s.InTx(func(tx *sql.Tx) error {
+		if e := Put(tx, p); e != nil {
+			return e
+		}
+		_, e := tx.Exec(`INSERT OR IGNORE INTO dirty VALUES(?)`, p.Key())
+		return e
+	})
+}
+
+// Publish records a stored package together with its file's modification time,
+// so the next scan can trust the unchanged file without rehashing it.
+func (s *Store) Publish(p vsix.Package, mtime int64) error {
+	return s.InTx(func(tx *sql.Tx) error {
+		if e := Put(tx, p); e != nil {
+			return e
+		}
+		return RememberFile(tx, p.Filename, p.Size, mtime, p.Key(), p.SHA256)
+	})
+}
+
+// RememberFile records what a VSIX file contains. If the name previously held another package,
+// that package is queued for the next scan.
+func RememberFile(tx *sql.Tx, name string, size, mtime int64, key, sha string) error {
+	var previous string
+	if e := tx.QueryRow(`SELECT key FROM files WHERE name=?`, name).Scan(&previous); e == nil && previous != key && previous != "" {
+		if _, e = tx.Exec(`INSERT OR IGNORE INTO dirty VALUES(?)`, previous); e != nil {
+			return e
+		}
+	} else if e != nil && e != sql.ErrNoRows {
+		return e
+	}
+	_, e := tx.Exec(`INSERT INTO files(name,size,mtime,key,sha) VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,key=excluded.key,sha=excluded.sha`, name, size, mtime, key, sha)
+	return e
+}
+
+// InTx runs f in one transaction, committing only if it succeeds.
+func (s *Store) InTx(f func(*sql.Tx) error) error {
+	tx, e := s.DB.Begin()
+	if e != nil {
+		return e
+	}
+	if e = f(tx); e != nil {
+		tx.Rollback()
+		return e
+	}
+	return tx.Commit()
+}
+
+func (s *Store) StatusCounts() (map[string]int, error) {
+	rows, e := s.DB.Query(`SELECT status, count(*) FROM packages GROUP BY status`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var status string
+		var n int
+		if e = rows.Scan(&status, &n); e != nil {
+			return nil, e
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
 }
 func (s *Store) Get(key string) (vsix.Package, error) {
 	var b string
@@ -86,7 +171,6 @@ func (s *Store) List(id string, limit, offset int) ([]vsix.Package, int, error) 
 	}
 	return out, total, rows.Err()
 }
-func (s *Store) All() ([]vsix.Package, error) { p, _, e := s.List("", 2147483647, 0); return p, e }
 
 // Totals counts stored content and the package records that need attention.
 type Totals struct {
@@ -209,7 +293,12 @@ func (s *Store) LookupUpload(key string) (string, string, error) {
 	return sha, p, e
 }
 func (s *Store) Audit(actor, action, detail string) error {
-	_, e := s.DB.Exec(`INSERT INTO audit(at,actor,action,detail) VALUES(?,?,?,?)`, time.Now().UTC().Format(time.RFC3339), actor, action, detail)
+	return AuditIn(s.DB, actor, action, detail)
+}
+
+// AuditIn records an audit event through x, which may be a transaction.
+func AuditIn(x Execer, actor, action, detail string) error {
+	_, e := x.Exec(`INSERT INTO audit(at,actor,action,detail) VALUES(?,?,?,?)`, time.Now().UTC().Format(time.RFC3339), actor, action, detail)
 	return e
 }
 func (s *Store) Events() ([]map[string]any, error) {

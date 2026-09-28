@@ -151,7 +151,7 @@ func (s *Server) Start() {
 	s.scanMu.Unlock()
 	slog.Info("inventory scan started", "directory", s.cfg.Extensions)
 	s.background.Go(func() {
-		e := s.Reconcile(func(done, total int) {
+		_, e := s.Reconcile(false, func(done, total int) {
 			s.scanMu.Lock()
 			s.scan.Scanned, s.scan.Total = done, total
 			s.scanMu.Unlock()
@@ -669,7 +669,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			old.Status = "stored"
-			if e = s.db.Put(old); e != nil {
+			if e = s.db.Publish(old, info.ModTime().UnixNano()); e != nil {
 				fail(w, 500, "database", "cannot confirm existing file")
 				return
 			}
@@ -693,9 +693,9 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dest := filepath.Join(s.cfg.Extensions, p.Filename)
-	// Journal before publishing: startup reconciliation recovers a link completed before the final commit.
+	// Journal before publishing: the next scan settles a link completed before the final commit.
 	p.Status = "pending"
-	if e = s.db.Put(p); e != nil {
+	if e = s.db.Journal(p); e != nil {
 		fail(w, 500, "database", "cannot journal upload")
 		return
 	}
@@ -716,8 +716,12 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 507, "storage", "publication needs reconciliation after directory flush failure")
 		return
 	}
+	var mtime int64
+	if info, err := os.Lstat(dest); err == nil {
+		mtime = info.ModTime().UnixNano()
+	}
 	p.Status = "stored"
-	if e = s.db.Put(p); e != nil {
+	if e = s.db.Publish(p, mtime); e != nil {
 		fail(w, 500, "database", "file published; retry to reconcile its receipt")
 		return
 	}
@@ -731,14 +735,15 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 201, map[string]any{"package": p, "duplicate": false})
 }
 
-// Reconcile verifies existing files and repairs pending publications. It never removes VSIXs.
-// progress, when set, receives the number of VSIX files examined so far and in total.
-func (s *Server) Reconcile(progress func(done, total int)) error {
+// Reconcile verifies the extension directory against the inventory and repairs records; it never removes
+// VSIXs. Files whose size and modification time match what was last verified are trusted; full rehashes
+// every file. progress, when set, receives the files verified so far and the expected total.
+func (s *Server) Reconcile(full bool, progress func(done, total int)) (changed int, e error) {
 	s.maintenance.Lock()
 	defer s.maintenance.Unlock()
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
-	return s.reconcileStorage(progress)
+	return s.reconcileStorage(full, progress)
 }
 
 func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
@@ -747,12 +752,8 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 		scanUnavailable(w, scan)
 		return
 	}
-	before, e := s.db.All()
-	if e != nil {
-		fail(w, 500, "database", "inventory unavailable")
-		return
-	}
-	e = s.Reconcile(nil)
+	full := r.URL.Query().Get("verify") == "full"
+	changed, e := s.Reconcile(full, nil)
 	if scan.State == scanFailed {
 		// A successful retry lifts the gate that the failed startup scan left in place.
 		s.finishScan(e)
@@ -762,107 +763,18 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "reconcile_failed", "storage reconciliation failed")
 		return
 	}
-	after, e := s.db.All()
+	counts, e := s.db.StatusCounts()
 	if e != nil {
 		fail(w, 500, "database", "inventory unavailable after reconciliation")
 		return
 	}
-	beforeStatus := map[string]string{}
-	for _, p := range before {
-		beforeStatus[p.Key()] = p.Status
-	}
-	changed := 0
-	for _, p := range after {
-		if status, ok := beforeStatus[p.Key()]; !ok || status != p.Status {
-			changed++
-		}
-	}
-	counts := map[string]int{}
-	for _, p := range after {
-		counts[p.Status]++
-	}
-	detail, _ := json.Marshal(map[string]any{"changed": changed, "counts": counts})
+	detail, _ := json.Marshal(map[string]any{"changed": changed, "counts": counts, "full": full})
 	_ = s.db.Audit(actor(r), "reconciled", string(detail))
 	jsonResponse(w, 200, map[string]any{
 		"ok":           true,
 		"changed":      changed,
 		"statusCounts": counts,
+		"fullVerify":   full,
 		"reconciledAt": time.Now().UTC().Format(time.RFC3339),
 	})
-}
-
-func (s *Server) reconcileStorage(progress func(done, total int)) error {
-	entries, e := os.ReadDir(s.cfg.Extensions)
-	if e != nil {
-		return e
-	}
-	var files []os.DirEntry
-	for _, ent := range entries {
-		if strings.HasPrefix(ent.Name(), ".upload-") && strings.HasSuffix(ent.Name(), ".part") {
-			_ = os.Remove(filepath.Join(s.cfg.Extensions, ent.Name()))
-		} else if strings.HasSuffix(strings.ToLower(ent.Name()), ".vsix") {
-			files = append(files, ent)
-		}
-	}
-	seen := map[string]bool{}
-	conflicts := map[string]bool{}
-	for i, ent := range files {
-		if e = s.ctx.Err(); e != nil {
-			return e
-		}
-		if progress != nil {
-			progress(i, len(files))
-		}
-		info, err := ent.Info()
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		p, err := vsix.Inspect(filepath.Join(s.cfg.Extensions, ent.Name()))
-		if err != nil {
-			slog.Warn("existing VSIX rejected", "file", ent.Name(), "error", err)
-			_ = s.db.Audit("startup", "invalid_existing", ent.Name())
-			continue
-		}
-		old, err := s.db.Get(p.Key())
-		if err == nil {
-			if old.SHA256 != p.SHA256 || conflicts[p.Key()] {
-				conflicts[p.Key()] = true
-				old.Status = "conflict"
-				_ = s.db.Put(old)
-				seen[p.Key()] = true
-				_ = s.db.Audit("startup", "conflict", p.Key())
-				continue
-			}
-			p.Managed = old.Managed
-			p.Source = old.Source
-			p.StoredAt = old.StoredAt
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		p.Filename = ent.Name()
-		if p.StoredAt == "" {
-			p.StoredAt = info.ModTime().UTC().Format(time.RFC3339)
-		}
-		p.Status = "stored"
-		if e = s.db.Put(p); e != nil {
-			return e
-		}
-		seen[p.Key()] = true
-	}
-	if progress != nil {
-		progress(len(files), len(files))
-	}
-	all, e := s.db.All()
-	if e != nil {
-		return e
-	}
-	for _, p := range all {
-		if !seen[p.Key()] {
-			p.Status = "missing"
-			if e = s.db.Put(p); e != nil {
-				return e
-			}
-		}
-	}
-	return nil
 }

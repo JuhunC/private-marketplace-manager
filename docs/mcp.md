@@ -56,7 +56,7 @@ in JSON. Never place the API token in MCP arguments or environment variables.
 | `manager_check_packages` | Check selected records against current regular-file presence and size |
 | `manager_audit_events` | Read the latest 100 audit events |
 | `manager_sync_runs` | Read the latest 100 synchronization reports |
-| `manager_reconcile_storage` | Rescan storage, recover pending records, inventory valid files, and mark absent records missing |
+| `manager_reconcile_storage` | Rescan storage, recover pending records, inventory valid files, and mark absent records missing. Set `fullVerify` to rehash every file instead of only new or changed ones |
 | `manager_upload_vsix` | Validate and idempotently upload one reviewed local VSIX |
 
 The first six tools are read-only. Reconciliation changes inventory metadata but
@@ -80,6 +80,6 @@ the configured size. Tool output never contains the API token.
    delete, quarantine, or select a winner.
 
 The manager API token currently grants inventory, report, upload, and reconcile
-access. v0.4.0 does not provide per-tool roles. Run the MCP server only for
+access. v0.5.0 does not provide per-tool roles. Run the MCP server only for
 trusted administrators, keep human approval enabled in the MCP host, and rotate
 the API token when retiring a workstation.

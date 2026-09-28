@@ -57,7 +57,7 @@ Successful response:
 | `GET /audit-events` | Latest 100 audit events |
 | `POST /sync-runs` | Save/update a JSON report with a run `id`; max 4 MiB |
 | `GET /sync-runs` | Latest 100 client-reported runs |
-| `POST /admin/reconcile` | Rescan storage, recover pending records, inventory valid external files, and mark absent records missing |
+| `POST /admin/reconcile?verify=full` | Rescan storage, recover pending records, inventory valid external files, and mark absent records missing. Without `verify=full`, files whose size and modification time are unchanged are trusted |
 | `POST /login` | Browser operator password login; matching Origin required |
 | `GET /me` | Session CSRF token and server version |
 | `POST /logout` | End browser session; matching Origin and CSRF header required |
@@ -68,11 +68,11 @@ Batch lookup example:
 {"keys":["publisher.extension@1.2.3@universal","publisher.extension@1.2.3@linux-arm64"]}
 ```
 
-Response: `{"packages":{"<key>":{...package metadata...}}}`. Absent, missing, or conflicting packages are not returned. Lightweight lookup checks presence/type/size, not the entire file hash. Restart reconciliation rehashes existing files. Avoid out-of-band changes.
+Response: `{"packages":{"<key>":{...package metadata...}}}`. Absent, missing, or conflicting packages are not returned. Lightweight lookup checks presence/type/size, not the entire file hash. Restart reconciliation rehashes new or changed files; `POST /admin/reconcile?verify=full` rehashes every file. Avoid out-of-band changes.
 
 Health endpoints `/health/live` and `/health/ready` are outside `/api/v1` and require no credentials. No endpoint accepts an arbitrary destination path, downloads arbitrary remote URLs, executes commands, or deletes VSIX files.
 
-`POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never deletes VSIX files or chooses between conflicting bytes. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records and counts by status.
+`POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never deletes VSIX files or chooses between conflicting bytes. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records, counts by status, and `fullVerify`. Routine scans (startup and reconcile without `verify=full`) remember each file's size and modification time and rehash only new or changed files; `verify=full` rehashes every file, which takes time proportional to the archive's size.
 
 ### Startup inventory scan
 

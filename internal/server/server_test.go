@@ -189,7 +189,7 @@ func TestConcurrentUploadAndStartupRecovery(t *testing.T) {
 	}
 	p.Status = "pending"
 	s.db.Put(p)
-	if e = s.Reconcile(nil); e != nil {
+	if _, e = s.Reconcile(false, nil); e != nil {
 		t.Fatal(e)
 	}
 	p, _ = s.db.Get(p.Key())
@@ -197,7 +197,7 @@ func TestConcurrentUploadAndStartupRecovery(t *testing.T) {
 		t.Fatal(p.Status)
 	}
 	os.Remove(filepath.Join(c.Extensions, p.Filename))
-	s.Reconcile(nil)
+	s.Reconcile(false, nil)
 	p, _ = s.db.Get(p.Key())
 	if p.Status != "missing" {
 		t.Fatal(p.Status)
@@ -210,7 +210,7 @@ func TestExistingUnmanagedAndSymlink(t *testing.T) {
 	s, h, c := setup(t)
 	b := testutil.VSIX("hello", "1.0.0", "", false, nil)
 	os.WriteFile(filepath.Join(c.Extensions, "custom.vsix"), b, 0644)
-	if e := s.Reconcile(nil); e != nil {
+	if _, e := s.Reconcile(false, nil); e != nil {
 		t.Fatal(e)
 	}
 	p, _ := s.db.Get("test.hello@1.0.0@universal")
@@ -434,7 +434,7 @@ func TestCatalogGroupsVersionsPerExtension(t *testing.T) {
 	if e := os.Remove(filepath.Join(c.Extensions, "test.other-0.1.0-universal.vsix")); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.Reconcile(nil); e != nil {
+	if _, e := s.Reconcile(false, nil); e != nil {
 		t.Fatal(e)
 	}
 	if _, list, _ = catalog("?attention=true"); len(list) != 1 || list[0]["id"] != "test.other" || list[0]["statusCounts"].(map[string]any)["missing"] != float64(1) {
@@ -443,5 +443,151 @@ func TestCatalogGroupsVersionsPerExtension(t *testing.T) {
 	_, status := getJSON(t, h, "/api/v1/status", auth)
 	if status["extensions"] != float64(1) || status["versions"] != float64(3) || status["packages"] != float64(4) || status["attention"] != float64(1) {
 		t.Fatalf("status totals: %v", status)
+	}
+}
+
+func statusOf(t *testing.T, s *Server, key string) string {
+	t.Helper()
+	p, e := s.db.Get(key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return p.Status
+}
+
+// sameSizeEdit replaces a file's bytes without changing its size or modification time.
+func sameSizeEdit(t *testing.T, path string, b []byte) {
+	t.Helper()
+	info, e := os.Stat(path)
+	if e != nil || info.Size() != int64(len(b)) {
+		t.Fatalf("replacement must keep the size: %v", e)
+	}
+	if e = os.WriteFile(path, b, 0644); e == nil {
+		e = os.Chtimes(path, info.ModTime(), info.ModTime())
+	}
+	if e != nil {
+		t.Fatal(e)
+	}
+}
+
+func TestScanTrustsUnchangedFilesAndRehashesChangedOnes(t *testing.T) {
+	s, h, c := setup(t)
+	original := testutil.VSIX("hello", "1.0.0", "", false, map[string]string{"extension/code.js": "aaaa"})
+	altered := testutil.VSIX("hello", "1.0.0", "", false, map[string]string{"extension/code.js": "bbbb"})
+	if code, _ := upload(t, h, original, "one"); code != 201 {
+		t.Fatal(code)
+	}
+	key, path := "test.hello@1.0.0@universal", filepath.Join(c.Extensions, "test.hello-1.0.0-universal.vsix")
+	sameSizeEdit(t, path, altered)
+	if _, e := s.Reconcile(false, nil); e != nil || statusOf(t, s, key) != "stored" {
+		t.Fatalf("an unchanged size and modification time should be trusted: %v %s", e, statusOf(t, s, key))
+	}
+	var expected int
+	if changed, e := s.Reconcile(true, func(_, n int) { expected = max(expected, n) }); e != nil || changed != 1 || statusOf(t, s, key) != "conflict" || expected != 1 {
+		t.Fatalf("full verification should rehash: %d %v %s, expected %d files", changed, e, statusOf(t, s, key), expected)
+	}
+	if e := os.WriteFile(path, original, 0644); e != nil {
+		t.Fatal(e)
+	}
+	later := time.Now().Add(time.Minute)
+	if e := os.Chtimes(path, later, later); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.Reconcile(false, nil); e != nil || statusOf(t, s, key) != "stored" {
+		t.Fatalf("a changed modification time should be rehashed: %v %s", e, statusOf(t, s, key))
+	}
+}
+
+func TestScanAdoptsVerifiedRecordsAfterUpgrade(t *testing.T) {
+	s, h, c := setup(t)
+	for i, name := range []string{"kept", "altered", "removed"} {
+		if code, _ := upload(t, h, testutil.VSIX(name, "1.0.0", "", false, map[string]string{"extension/code.js": "aaaa"}), fmt.Sprint(i)); code != 201 {
+			t.Fatal(code)
+		}
+	}
+	// A database from the previous version has records but no remembered files.
+	if _, e := s.db.DB.Exec(`DELETE FROM files; DELETE FROM meta; DELETE FROM dirty`); e != nil {
+		t.Fatal(e)
+	}
+	sameSizeEdit(t, filepath.Join(c.Extensions, "test.altered-1.0.0-universal.vsix"), testutil.VSIX("altered", "1.0.0", "", false, map[string]string{"extension/code.js": "bbbb"}))
+	os.Remove(filepath.Join(c.Extensions, "test.removed-1.0.0-universal.vsix"))
+	if e := os.WriteFile(filepath.Join(c.Extensions, "external.vsix"), testutil.VSIX("external", "2.0.0", "", false, nil), 0644); e != nil {
+		t.Fatal(e)
+	}
+	changed, e := s.Reconcile(false, nil)
+	if e != nil || changed != 2 {
+		t.Fatalf("adoption pass: %d %v", changed, e)
+	}
+	for key, want := range map[string]string{"test.kept@1.0.0@universal": "stored", "test.altered@1.0.0@universal": "stored", "test.removed@1.0.0@universal": "missing", "test.external@2.0.0@universal": "stored"} {
+		if got := statusOf(t, s, key); got != want {
+			t.Fatalf("%s: %s, want %s", key, got, want)
+		}
+	}
+	var remembered int
+	s.db.DB.QueryRow(`SELECT count(*) FROM files`).Scan(&remembered)
+	if remembered != 3 {
+		t.Fatalf("remembered files: %d", remembered)
+	}
+}
+
+func TestScanAcrossManyBatches(t *testing.T) {
+	defer func(n int) { scanBatch = n }(scanBatch)
+	scanBatch = 3
+	s, _, c := setup(t)
+	write := func(name string, b []byte) {
+		t.Helper()
+		if e := os.WriteFile(filepath.Join(c.Extensions, name), b, 0644); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for i := range 20 {
+		write(fmt.Sprintf("ext%02d.vsix", i), testutil.VSIX(fmt.Sprintf("ext%02d", i), "1.0.0", "", false, nil))
+	}
+	write("broken.vsix", []byte("not a zip"))
+	write("copy-a.vsix", testutil.VSIX("dup", "1.0.0", "", false, map[string]string{"extension/code.js": "aaaa"}))
+	write("copy-b.vsix", testutil.VSIX("dup", "1.0.0", "", false, map[string]string{"extension/code.js": "bbbb"}))
+	if changed, e := s.Reconcile(false, nil); e != nil || changed != 21 {
+		t.Fatalf("first scan: %d %v", changed, e)
+	}
+	if statusOf(t, s, "test.dup@1.0.0@universal") != "conflict" {
+		t.Fatal("different bytes for one identity must conflict")
+	}
+	invalid := func() (n int) {
+		s.db.DB.QueryRow(`SELECT count(*) FROM audit WHERE action='invalid_existing'`).Scan(&n)
+		return n
+	}
+	if invalid() != 1 {
+		t.Fatalf("invalid file audits: %d", invalid())
+	}
+	for _, i := range []int{2, 9, 17} {
+		os.Remove(filepath.Join(c.Extensions, fmt.Sprintf("ext%02d.vsix", i)))
+	}
+	// Removing the copy that disagrees with the record resolves the conflict.
+	dup, _ := s.db.Get("test.dup@1.0.0@universal")
+	if hash, _, _ := vsix.HashFile(filepath.Join(c.Extensions, "copy-a.vsix")); hash == dup.SHA256 {
+		os.Remove(filepath.Join(c.Extensions, "copy-b.vsix"))
+	} else {
+		os.Remove(filepath.Join(c.Extensions, "copy-a.vsix"))
+	}
+	var done, total int
+	changed, e := s.Reconcile(false, func(d, n int) { done, total = d, n })
+	if e != nil || changed != 4 || done != 19 || total != 19 {
+		t.Fatalf("second scan: changed %d, progress %d/%d, %v", changed, done, total, e)
+	}
+	for _, i := range []int{2, 9, 17} {
+		if statusOf(t, s, fmt.Sprintf("test.ext%02d@1.0.0@universal", i)) != "missing" {
+			t.Fatalf("ext%02d should be missing", i)
+		}
+	}
+	if statusOf(t, s, "test.dup@1.0.0@universal") != "stored" || statusOf(t, s, "test.ext03@1.0.0@universal") != "stored" {
+		t.Fatal("remaining files should be stored")
+	}
+	if invalid() != 1 {
+		t.Fatalf("an unchanged invalid file was audited again: %d", invalid())
+	}
+	var pending int
+	s.db.DB.QueryRow(`SELECT count(*) FROM dirty`).Scan(&pending)
+	if pending != 0 {
+		t.Fatalf("queued keys left after a scan: %d", pending)
 	}
 }
