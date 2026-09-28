@@ -34,7 +34,7 @@
         "summary": "Service status",
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Success, including startup inventory scan progress in `inventory`"
           },
           "401": {
             "description": "Invalid credential"
@@ -51,6 +51,9 @@
           },
           "401": {
             "description": "Invalid credential"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
           }
         },
         "parameters": [
@@ -155,6 +158,9 @@
           },
           "507": {
             "description": "Storage operation failed"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
           }
         }
       }
@@ -168,6 +174,9 @@
           },
           "401": {
             "description": "Invalid credential"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
           }
         },
         "requestBody": {
@@ -203,6 +212,9 @@
           },
           "401": {
             "description": "Invalid credential"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
           }
         },
         "parameters": [
@@ -226,6 +238,9 @@
           },
           "401": {
             "description": "Invalid credential"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
           }
         },
         "parameters": [
@@ -305,6 +320,9 @@
           },
           "500": {
             "description": "Storage or database reconciliation failed"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After). After a failed scan, this call retries it"
           }
         }
       }
@@ -394,10 +412,10 @@
         "summary": "ready health",
         "responses": {
           "200": {
-            "description": "Healthy"
+            "description": "Serving. `status` is `starting` while the startup inventory scan runs, then `ready`"
           },
           "503": {
-            "description": "Not ready"
+            "description": "Database, storage, or startup inventory scan failure"
           }
         }
       }

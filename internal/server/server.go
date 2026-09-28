@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
@@ -45,6 +46,22 @@ type attempt struct {
 	Count int
 	Until time.Time
 }
+
+// Startup scan states reported by /api/v1/status.
+const (
+	scanRunning = "scanning"
+	scanReady   = "ready"
+	scanFailed  = "failed"
+)
+
+type scanStatus struct {
+	State      string `json:"state"`
+	Scanned    int    `json:"scanned"`
+	Total      int    `json:"total"`
+	StartedAt  string `json:"startedAt,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
 type Server struct {
 	cfg          Config
 	db           *store.Store
@@ -59,8 +76,15 @@ type Server struct {
 	sessions     map[string]session
 	attempts     map[string]attempt
 	slots        chan struct{}
+	ctx          context.Context
+	stop         context.CancelFunc
+	background   sync.WaitGroup
+	scanMu       sync.Mutex
+	scan         scanStatus
 }
 
+// New opens the state directory without scanning extensions, so the listener can start at once.
+// Call Start to run the scan; inventory endpoints answer 503 until it finishes.
 func New(c Config) (*Server, error) {
 	if len(c.Token) < 32 || len(c.Password) < 12 {
 		return nil, fmt.Errorf("API token must be at least 32 characters and admin password at least 12")
@@ -99,7 +123,8 @@ func New(c Config) (*Server, error) {
 		lock.Unlock()
 		return nil, e
 	}
-	s := &Server{cfg: c, db: db, lock: lock, mux: http.NewServeMux(), tokenHash: sha256.Sum256([]byte(c.Token)), sessions: map[string]session{}, attempts: map[string]attempt{}, slots: make(chan struct{}, 4)}
+	ctx, stop := context.WithCancel(context.Background())
+	s := &Server{cfg: c, db: db, lock: lock, mux: http.NewServeMux(), tokenHash: sha256.Sum256([]byte(c.Token)), sessions: map[string]session{}, attempts: map[string]attempt{}, slots: make(chan struct{}, 4), ctx: ctx, stop: stop, scan: scanStatus{State: scanRunning}}
 	s.salt = make([]byte, 32)
 	if _, e = rand.Read(s.salt); e != nil {
 		s.Close()
@@ -112,14 +137,58 @@ func New(c Config) (*Server, error) {
 	}
 	s.cfg.Password = ""
 	s.cfg.Token = ""
-	if e = s.Reconcile(); e != nil {
-		s.Close()
-		return nil, e
-	}
 	s.routes()
 	return s, nil
 }
-func (s *Server) Close() error { e := s.db.Close(); s.lock.Unlock(); return e }
+
+// Start inventories the extension directory in the background. Hashing a large archive can take
+// minutes, so it must not delay the listener or the container healthcheck.
+func (s *Server) Start() {
+	started := time.Now()
+	s.scanMu.Lock()
+	s.scan.StartedAt = started.UTC().Format(time.RFC3339)
+	s.scanMu.Unlock()
+	slog.Info("inventory scan started", "directory", s.cfg.Extensions)
+	s.background.Go(func() {
+		e := s.Reconcile(func(done, total int) {
+			s.scanMu.Lock()
+			s.scan.Scanned, s.scan.Total = done, total
+			s.scanMu.Unlock()
+		})
+		if s.ctx.Err() != nil {
+			return
+		}
+		s.finishScan(e)
+		if e != nil {
+			slog.Error("inventory scan failed; inventory endpoints stay unavailable until a reconcile succeeds", "error", e)
+			return
+		}
+		slog.Info("inventory scan finished", "files", s.scanState().Total, "duration", time.Since(started).Round(time.Millisecond).String())
+	})
+}
+
+// finishScan records the outcome of the startup scan, or of a reconcile retrying a failed one.
+func (s *Server) finishScan(e error) {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	s.scan.State, s.scan.Error = scanReady, ""
+	if e != nil {
+		s.scan.State, s.scan.Error = scanFailed, e.Error()
+	}
+	s.scan.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+}
+func (s *Server) scanState() scanStatus {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	return s.scan
+}
+func (s *Server) Close() error {
+	s.stop()
+	s.background.Wait()
+	e := s.db.Close()
+	s.lock.Unlock()
+	return e
+}
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -156,11 +225,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/me", s.auth(s.me))
 	s.mux.HandleFunc("POST /api/v1/logout", s.auth(s.logout))
 	s.mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
-	s.mux.HandleFunc("GET /api/v1/extensions", s.auth(s.list))
-	s.mux.HandleFunc("POST /api/v1/extensions", s.auth(s.upload))
-	s.mux.HandleFunc("POST /api/v1/extensions/check", s.auth(s.check))
-	s.mux.HandleFunc("GET /api/v1/packages/download", s.auth(s.download))
-	s.mux.HandleFunc("GET /api/v1/uploads/by-key/{key}", s.auth(s.uploadStatus))
+	s.mux.HandleFunc("GET /api/v1/extensions", s.auth(s.afterScan(s.list)))
+	s.mux.HandleFunc("POST /api/v1/extensions", s.auth(s.afterScan(s.upload)))
+	s.mux.HandleFunc("POST /api/v1/extensions/check", s.auth(s.afterScan(s.check)))
+	s.mux.HandleFunc("GET /api/v1/packages/download", s.auth(s.afterScan(s.download)))
+	s.mux.HandleFunc("GET /api/v1/uploads/by-key/{key}", s.auth(s.afterScan(s.uploadStatus)))
 	s.mux.HandleFunc("GET /api/v1/audit-events", s.auth(s.events))
 	s.mux.HandleFunc("POST /api/v1/sync-runs", s.auth(s.report))
 	s.mux.HandleFunc("GET /api/v1/sync-runs", s.auth(s.runs))
@@ -180,7 +249,34 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	}
 	f.Close()
 	os.Remove(f.Name())
-	jsonResponse(w, 200, map[string]string{"status": "ready"})
+	switch s.scanState().State {
+	case scanFailed:
+		fail(w, 503, "not_ready", "inventory scan failed; see manager logs")
+	case scanRunning:
+		// Serving while the scan runs; inventory endpoints answer 503 until it finishes.
+		jsonResponse(w, 200, map[string]string{"status": "starting"})
+	default:
+		jsonResponse(w, 200, map[string]string{"status": "ready"})
+	}
+}
+
+// afterScan answers 503 until the startup scan has finished, so no client acts on a partial inventory.
+func (s *Server) afterScan(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if scan := s.scanState(); scan.State != scanReady {
+			scanUnavailable(w, scan)
+			return
+		}
+		next(w, r)
+	}
+}
+func scanUnavailable(w http.ResponseWriter, scan scanStatus) {
+	if scan.State == scanFailed {
+		fail(w, 503, "scan_failed", "inventory scan failed; check the manager logs, then run POST /api/v1/admin/reconcile")
+		return
+	}
+	w.Header().Set("Retry-After", "30")
+	fail(w, 503, "starting", fmt.Sprintf("inventory scan in progress (%d of %d files); retry later", scan.Scanned, scan.Total))
 }
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +440,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 			bytes += v.Size
 		}
 	}
-	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "packages": n, "bytes": bytes, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 1})
+	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "packages": n, "bytes": bytes, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 1, "inventory": s.scanState()})
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	v, e := s.db.Events()
@@ -573,21 +669,32 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 }
 
 // Reconcile verifies existing files and repairs pending publications. It never removes VSIXs.
-func (s *Server) Reconcile() error {
+// progress, when set, receives the number of VSIX files examined so far and in total.
+func (s *Server) Reconcile(progress func(done, total int)) error {
 	s.maintenance.Lock()
 	defer s.maintenance.Unlock()
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
-	return s.reconcileStorage()
+	return s.reconcileStorage(progress)
 }
 
 func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
+	scan := s.scanState()
+	if scan.State == scanRunning {
+		scanUnavailable(w, scan)
+		return
+	}
 	before, e := s.db.All()
 	if e != nil {
 		fail(w, 500, "database", "inventory unavailable")
 		return
 	}
-	if e = s.Reconcile(); e != nil {
+	e = s.Reconcile(nil)
+	if scan.State == scanFailed {
+		// A successful retry lifts the gate that the failed startup scan left in place.
+		s.finishScan(e)
+	}
+	if e != nil {
 		_ = s.db.Audit(actor(r), "reconcile_failed", e.Error())
 		fail(w, 500, "reconcile_failed", "storage reconciliation failed")
 		return
@@ -621,20 +728,27 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) reconcileStorage() error {
+func (s *Server) reconcileStorage(progress func(done, total int)) error {
 	entries, e := os.ReadDir(s.cfg.Extensions)
 	if e != nil {
 		return e
 	}
-	seen := map[string]bool{}
-	conflicts := map[string]bool{}
+	var files []os.DirEntry
 	for _, ent := range entries {
 		if strings.HasPrefix(ent.Name(), ".upload-") && strings.HasSuffix(ent.Name(), ".part") {
 			_ = os.Remove(filepath.Join(s.cfg.Extensions, ent.Name()))
-			continue
+		} else if strings.HasSuffix(strings.ToLower(ent.Name()), ".vsix") {
+			files = append(files, ent)
 		}
-		if !strings.HasSuffix(strings.ToLower(ent.Name()), ".vsix") {
-			continue
+	}
+	seen := map[string]bool{}
+	conflicts := map[string]bool{}
+	for i, ent := range files {
+		if e = s.ctx.Err(); e != nil {
+			return e
+		}
+		if progress != nil {
+			progress(i, len(files))
 		}
 		info, err := ent.Info()
 		if err != nil || !info.Mode().IsRegular() {
@@ -671,6 +785,9 @@ func (s *Server) reconcileStorage() error {
 			return e
 		}
 		seen[p.Key()] = true
+	}
+	if progress != nil {
+		progress(len(files), len(files))
 	}
 	all, e := s.db.All()
 	if e != nil {

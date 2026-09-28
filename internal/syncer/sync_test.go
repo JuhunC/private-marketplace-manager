@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,6 +85,46 @@ func TestRetryClassification(t *testing.T) {
 	retry(ctx, 4, func() (time.Duration, error) { calls++; return 0, nil })
 	if calls != 0 {
 		t.Fatal("canceled job ran")
+	}
+}
+func TestSyncWaitsForManagerInventoryScan(t *testing.T) {
+	defer func(old time.Duration) { scanPoll = old }(scanPoll)
+	scanPoll = time.Millisecond
+	var calls atomic.Int32
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/status":
+			state := "failed"
+			switch n := calls.Add(1); {
+			case n < 3:
+				state = "scanning"
+			case n == 3:
+				state = "ready"
+			}
+			fmt.Fprintf(w, `{"apiVersion":1,"inventory":{"state":%q,"scanned":1,"total":2,"error":"disk unavailable"}}`, state)
+		case "/api/v1/sync-runs":
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			t.Errorf("unexpected %s before the scan finished", r.URL.Path)
+			w.WriteHeader(503)
+		}
+	}))
+	defer h.Close()
+	base := t.TempDir()
+	token := filepath.Join(base, "token")
+	os.WriteFile(token, []byte(strings.Repeat("x", 32)), 0600)
+	list := filepath.Join(base, "extensions.txt")
+	os.WriteFile(list, []byte("# nothing to collect yet\n"), 0600)
+	r, e := New(Config{ServerURL: h.URL, TokenFile: token, WorkDir: filepath.Join(base, "work"), Concurrency: 1, MaxDownloadBytes: 1 << 20, Retries: 1, AllowInsecureHTTP: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	r.Log = io.Discard
+	if report, e := r.Run(context.Background(), list, false); e != nil || report.Status != "empty-list" || calls.Load() != 3 {
+		t.Fatalf("run after scan: %+v %v, %d status calls", report, e, calls.Load())
+	}
+	if _, e := r.Run(context.Background(), list, false); e == nil || !strings.Contains(e.Error(), "disk unavailable") {
+		t.Fatalf("failed scan did not stop the run: %v", e)
 	}
 }
 func TestMigrationAndChangingList(t *testing.T) {

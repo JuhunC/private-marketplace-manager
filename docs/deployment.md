@@ -61,7 +61,7 @@ The `.env` file controls these Compose settings:
 
 | Variable | Example | Purpose |
 |---|---|---|
-| `MANAGER_IMAGE` | `ghcr.io/juhunc/private-marketplace-manager:0.2.0` | Pinned manager image |
+| `MANAGER_IMAGE` | `ghcr.io/juhunc/private-marketplace-manager:0.3.0` | Pinned manager image |
 | `PUBLIC_URL` | `https://marketplace-manager.corp.example.com` | Exact browser-facing origin |
 | `MANAGER_BIND_ADDRESS` / `MANAGER_HOST_PORT` | `127.0.0.1` / `8080` | Host listener used by the TLS proxy |
 | `EXTENSIONS_HOST_DIR` | `/srv/vsmarketplace/extensions` | Existing Microsoft marketplace VSIX directory |
@@ -101,16 +101,16 @@ The receiver does not restart the existing marketplace. Its dashboard deliberate
 
 ## 5. Operations and recovery
 
-- `/health/live` checks process liveness. `/health/ready` checks database and writable storage. The container uses readiness as its healthcheck.
+- `/health/live` checks process liveness. `/health/ready` checks database and writable storage, returning `{"status":"starting"}` while the startup inventory scan runs, `{"status":"ready"}` after it, and 503 if the scan failed. The container uses readiness as its healthcheck, so it is healthy as soon as the manager serves requests.
 - Sync reports record success, no changes, empty lists, and partial failures. Logs go to stdout/stderr; audit events and reports live in SQLite. Monitor filesystem free space externally; no automatic pruning occurs.
 - Inbound uploads are bounded to four active requests. A fifth receives 429 with `Retry-After`. Do not set aggressive client concurrency.
-- Startup scans and hashes all VSIXs, so large historical archives increase startup time. Adjust startup probe grace periods for the measured inventory.
+- The manager listens immediately, then scans and hashes all VSIXs in the background. Until the scan finishes, inventory, lookup, upload, download, receipt, and reconcile requests return 503 `starting` with `Retry-After`. `GET /api/v1/status`, the webpage, and the `inventory scan started`/`inventory scan finished` log lines show progress, and `marketplace-sync` waits for it. Large archives lengthen this window, not container startup. If the scan fails (for example, an unreadable share), readiness returns 503 and the container turns unhealthy; fix the cause, then run `POST /api/v1/admin/reconcile` or restart.
 - Startup repairs published-but-pending records and marks absent files missing. Invalid/conflicting existing packages appear in startup logs/audit. Existing directory files are never deleted except abandoned `.upload-*.part` staging files from an interrupted manager.
 - Avoid external writers while running. Restart the manager after manual directory changes to reconcile inventory. An out-of-band same-size edit can evade the lightweight batch inventory check until reconciliation; startup rehashes the files.
 - If storage fills up, free space without deleting required history, then rerun synchronization. Existing confirmed packages are retained.
 - Back up the extension folder and state directory while the manager is stopped. Restore together, then start to reconcile. Keep settings and secrets in your organization's approved backup/secret system.
 - Rotate token/password by replacing secret files and restarting; sessions end. Use a new token when retiring a client machine.
-- To withdraw a bad version in v0.2.0, stop scheduled collection for its identifier and coordinate removal/quarantine with the Linux operator. A subsequent all-version collection would otherwise upload the version again. Per-version suppression is a roadmap feature.
+- To withdraw a bad version in v0.3.0, stop scheduled collection for its identifier and coordinate removal/quarantine with the Linux operator. A subsequent all-version collection would otherwise upload the version again. Per-version suppression is a roadmap feature.
 - Application rollback: stop the manager and restore a compatible image/state backup. No application update should remove historical VSIXs.
 
 The default release is a single-operator service. Treat the API token as an upload/inventory/report credential, not a public browser credential. There are no file-delete, shell-execution, or arbitrary-URL-fetch endpoints.

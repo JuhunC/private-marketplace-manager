@@ -69,6 +69,7 @@ func run() error {
 		return e
 	}
 	defer s.Close()
+	s.Start()
 	h := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Minute, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -78,7 +79,7 @@ func run() error {
 		defer cancel()
 		h.Shutdown(c)
 	}()
-	slog.Info("manager ready", "address", addr, "version", buildinfo.Version)
+	slog.Info("manager listening", "address", addr, "version", buildinfo.Version)
 	e = h.ListenAndServe()
 	if e == http.ErrServerClosed {
 		return nil

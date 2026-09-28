@@ -12,8 +12,8 @@ def request(path,data=None):
 def ready():
     for _ in range(90):
         try:
-            status,_=request('/health/ready')
-            if status==200:return
+            status,body=request('/health/ready')
+            if status==200 and body['status']=='ready':return
         except Exception:pass
         time.sleep(1)
     raise RuntimeError('container did not become ready')

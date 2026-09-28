@@ -14,11 +14,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const testToken = "0123456789012345678901234567890123456789"
 
-func setup(t *testing.T) (*Server, *httptest.Server, Config) {
+// unstarted returns a serving manager whose startup scan has not begun.
+func unstarted(t *testing.T) (*Server, *httptest.Server, Config) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("receiver is a Linux container; Windows CLI tested separately")
@@ -33,6 +35,13 @@ func setup(t *testing.T) (*Server, *httptest.Server, Config) {
 	t.Cleanup(func() { h.Close(); s.Close() })
 	return s, h, c
 }
+func setup(t *testing.T) (*Server, *httptest.Server, Config) {
+	t.Helper()
+	s, h, c := unstarted(t)
+	s.Start()
+	s.background.Wait()
+	return s, h, c
+}
 func request(t *testing.T, h *httptest.Server, method, path string, b []byte, headers map[string]string) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest(method, h.URL+path, bytes.NewReader(b))
@@ -44,6 +53,14 @@ func request(t *testing.T, h *httptest.Server, method, path string, b []byte, he
 		t.Fatal(e)
 	}
 	return r
+}
+func getJSON(t *testing.T, h *httptest.Server, path string, headers map[string]string) (int, map[string]any) {
+	t.Helper()
+	r := request(t, h, "GET", path, nil, headers)
+	defer r.Body.Close()
+	var result map[string]any
+	json.NewDecoder(r.Body).Decode(&result)
+	return r.StatusCode, result
 }
 func upload(t *testing.T, h *httptest.Server, b []byte, key string) (int, map[string]any) {
 	t.Helper()
@@ -171,7 +188,7 @@ func TestConcurrentUploadAndStartupRecovery(t *testing.T) {
 	}
 	p.Status = "pending"
 	s.db.Put(p)
-	if e = s.Reconcile(); e != nil {
+	if e = s.Reconcile(nil); e != nil {
 		t.Fatal(e)
 	}
 	p, _ = s.db.Get(p.Key())
@@ -179,7 +196,7 @@ func TestConcurrentUploadAndStartupRecovery(t *testing.T) {
 		t.Fatal(p.Status)
 	}
 	os.Remove(filepath.Join(c.Extensions, p.Filename))
-	s.Reconcile()
+	s.Reconcile(nil)
 	p, _ = s.db.Get(p.Key())
 	if p.Status != "missing" {
 		t.Fatal(p.Status)
@@ -192,7 +209,7 @@ func TestExistingUnmanagedAndSymlink(t *testing.T) {
 	s, h, c := setup(t)
 	b := testutil.VSIX("hello", "1.0.0", "", false, nil)
 	os.WriteFile(filepath.Join(c.Extensions, "custom.vsix"), b, 0644)
-	if e := s.Reconcile(); e != nil {
+	if e := s.Reconcile(nil); e != nil {
 		t.Fatal(e)
 	}
 	p, _ := s.db.Get("test.hello@1.0.0@universal")
@@ -257,5 +274,83 @@ func TestAdminReconcileRepairsMissingAndInventoriesNewFiles(t *testing.T) {
 	r.Body.Close()
 	if r.StatusCode != 401 {
 		t.Fatalf("unauthenticated reconcile: %d", r.StatusCode)
+	}
+}
+
+func TestInventoryWaitsForBackgroundStartupScan(t *testing.T) {
+	s, h, c := unstarted(t)
+	h.Client().Timeout = 5 * time.Second // a refused request must answer at once, not wait for the scan
+	if e := os.WriteFile(filepath.Join(c.Extensions, "existing.vsix"), testutil.VSIX("hello", "1.0.0", "", false, nil), 0644); e != nil {
+		t.Fatal(e)
+	}
+	// Hold the scan at its first step, as hashing a large archive would.
+	s.maintenance.Lock()
+	release := sync.OnceFunc(s.maintenance.Unlock)
+	t.Cleanup(release)
+	s.Start()
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	if code, body := getJSON(t, h, "/health/ready", nil); code != 200 || body["status"] != "starting" {
+		t.Fatalf("readiness while scanning: %d %v", code, body)
+	}
+	for _, path := range []string{"POST /api/v1/extensions", "GET /api/v1/extensions", "POST /api/v1/extensions/check", "GET /api/v1/packages/download?key=test.hello@1.0.0@universal", "GET /api/v1/uploads/by-key/any", "POST /api/v1/admin/reconcile"} {
+		method, target, _ := strings.Cut(path, " ")
+		r := request(t, h, method, target, nil, auth)
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		r.Body.Close()
+		if r.StatusCode != 503 || body["code"] != "starting" || r.Header.Get("Retry-After") == "" {
+			t.Fatalf("%s while scanning: %d %v", path, r.StatusCode, body)
+		}
+	}
+	code, status := getJSON(t, h, "/api/v1/status", auth)
+	if scan, _ := status["inventory"].(map[string]any); code != 200 || scan["state"] != "scanning" {
+		t.Fatalf("status while scanning: %d %v", code, status)
+	}
+	release()
+	s.background.Wait()
+	if code, body := getJSON(t, h, "/health/ready", nil); code != 200 || body["status"] != "ready" {
+		t.Fatalf("readiness after scan: %d %v", code, body)
+	}
+	if code, list := getJSON(t, h, "/api/v1/extensions", auth); code != 200 || list["total"] != float64(1) {
+		t.Fatalf("inventory after scan: %d %v", code, list)
+	}
+	_, status = getJSON(t, h, "/api/v1/status", auth)
+	if scan, _ := status["inventory"].(map[string]any); scan["state"] != "ready" || scan["scanned"] != float64(1) || scan["total"] != float64(1) {
+		t.Fatalf("status after scan: %v", status)
+	}
+}
+
+func TestFailedStartupScanRecoversThroughReconcile(t *testing.T) {
+	s, h, c := unstarted(t)
+	// An unmounted or unreadable share makes the directory listing fail.
+	if e := os.Remove(c.Extensions); e != nil {
+		t.Fatal(e)
+	}
+	s.Start()
+	s.background.Wait()
+	if e := os.Mkdir(c.Extensions, 0750); e != nil {
+		t.Fatal(e)
+	}
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	if code, body := getJSON(t, h, "/health/ready", nil); code != 503 {
+		t.Fatalf("readiness after failed scan: %d %v", code, body)
+	}
+	if code, body := getJSON(t, h, "/api/v1/extensions", auth); code != 503 || body["code"] != "scan_failed" {
+		t.Fatalf("inventory after failed scan: %d %v", code, body)
+	}
+	_, status := getJSON(t, h, "/api/v1/status", auth)
+	if scan, _ := status["inventory"].(map[string]any); scan["state"] != "failed" || scan["error"] == nil {
+		t.Fatalf("status after failed scan: %v", status)
+	}
+	r := request(t, h, "POST", "/api/v1/admin/reconcile", nil, auth)
+	r.Body.Close()
+	if r.StatusCode != 200 {
+		t.Fatalf("reconcile retry: %d", r.StatusCode)
+	}
+	if code, body := getJSON(t, h, "/health/ready", nil); code != 200 || body["status"] != "ready" {
+		t.Fatalf("readiness after reconcile: %d %v", code, body)
+	}
+	if code, _ := getJSON(t, h, "/api/v1/extensions", auth); code != 200 {
+		t.Fatalf("inventory after reconcile: %d", code)
 	}
 }

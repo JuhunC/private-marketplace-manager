@@ -203,6 +203,19 @@ func analyze(ctx context.Context, api *adminapi.Client) Analysis {
 		addFinding(Finding{Severity: "critical", Code: "status_unavailable", Summary: "Authenticated manager status is unavailable", Evidence: e.Error(), SuggestedAction: "Check the server URL, TLS trust, API token, and manager logs."})
 		return out
 	}
+	// Inventory endpoints refuse requests until the startup scan finishes, so there is nothing more to examine yet.
+	scan, _ := out.Status["inventory"].(map[string]any)
+	switch scan["state"] {
+	case "scanning":
+		scanned, _ := scan["scanned"].(float64)
+		total, _ := scan["total"].(float64)
+		addFinding(Finding{Severity: "info", Code: "inventory_scan_running", Summary: "The manager is still scanning its extension directory after a restart", Evidence: fmt.Sprintf("%d of %d files examined", int(scanned), int(total)), SuggestedAction: "Wait for the scan to finish, then rerun manager_analyze. Inventory, upload, and download requests are refused until then."})
+		return out
+	case "failed":
+		out.Healthy = false
+		addFinding(Finding{Severity: "critical", Code: "inventory_scan_failed", Summary: "The startup inventory scan failed", Evidence: fmt.Sprint(scan["error"]), SuggestedAction: "Fix the reported storage or database problem, then run manager_reconcile_storage."})
+		return out
+	}
 	const maximum = 5000
 	for offset := 0; offset < maximum; offset += 500 {
 		var page struct {

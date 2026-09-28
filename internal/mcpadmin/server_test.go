@@ -3,10 +3,13 @@ package mcpadmin
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +42,20 @@ func TestMCPToolsAnalyzeUploadAndReconcile(t *testing.T) {
 	}
 	httpServer := httptest.NewServer(manager.Handler())
 	t.Cleanup(func() { httpServer.Close(); manager.Close() })
+	manager.Start()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var ready struct{ Status string }
+		if r, e := httpServer.Client().Get(httpServer.URL + "/health/ready"); e == nil {
+			json.NewDecoder(r.Body).Decode(&ready)
+			r.Body.Close()
+		}
+		if ready.Status == "ready" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("manager inventory scan did not finish")
+		}
+	}
 	tokenFile := filepath.Join(dir, "token")
 	if e = os.WriteFile(tokenFile, []byte(mcpTestToken), 0600); e != nil {
 		t.Fatal(e)
@@ -89,6 +106,48 @@ func TestMCPToolsAnalyzeUploadAndReconcile(t *testing.T) {
 	list := callToolJSON(t, ctx, clientSession, "manager_inventory", map[string]any{"id": "test.repair"})
 	if total, _ := list["total"].(float64); total != 1 {
 		t.Fatalf("unexpected inventory: %+v", list)
+	}
+}
+
+func TestAnalyzeReportsStartupScan(t *testing.T) {
+	var failed atomic.Bool
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health/ready":
+			if failed.Load() {
+				w.WriteHeader(503)
+				io.WriteString(w, `{"code":"not_ready","error":"inventory scan failed; see manager logs"}`)
+				return
+			}
+			io.WriteString(w, `{"status":"starting"}`)
+		case "/api/v1/status":
+			if failed.Load() {
+				io.WriteString(w, `{"apiVersion":1,"inventory":{"state":"failed","scanned":3,"total":10,"error":"open /data/extensions: permission denied"}}`)
+				return
+			}
+			io.WriteString(w, `{"apiVersion":1,"inventory":{"state":"scanning","scanned":3,"total":10}}`)
+		default:
+			t.Errorf("analysis requested %s during the startup scan", r.URL.Path)
+			w.WriteHeader(503)
+		}
+	}))
+	defer manager.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if e := os.WriteFile(tokenFile, []byte(mcpTestToken), 0600); e != nil {
+		t.Fatal(e)
+	}
+	api, e := adminapi.New(adminapi.Config{ServerURL: manager.URL, TokenFile: tokenFile, AllowInsecureHTTP: true, MaxUploadBytes: 1 << 20})
+	if e != nil {
+		t.Fatal(e)
+	}
+	out := analyze(context.Background(), api)
+	if !out.Healthy || len(out.Findings) != 1 || out.Findings[0].Code != "inventory_scan_running" || out.Findings[0].Evidence != "3 of 10 files examined" {
+		t.Fatalf("scanning analysis: %+v", out)
+	}
+	failed.Store(true)
+	out = analyze(context.Background(), api)
+	if out.Healthy || len(out.Findings) != 2 || out.Findings[0].Code != "manager_not_ready" || out.Findings[1].Code != "inventory_scan_failed" || out.Findings[1].Evidence != "open /data/extensions: permission denied" {
+		t.Fatalf("failed-scan analysis: %+v", out)
 	}
 }
 

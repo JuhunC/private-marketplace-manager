@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-version="${1:?Pass release version, for example v0.2.0}"
+version="${1:?Pass release version, for example v0.3.0}"
 rm -rf dist
 mkdir -p dist
 for tool in marketplace-sync marketplace-mcp; do

@@ -46,7 +46,7 @@ Successful response:
 
 | Method and path | Purpose |
 |---|---|
-| `GET /status` | API version, package count, total bytes, upload limit |
+| `GET /status` | API version, package count, total bytes, upload limit, startup scan progress (`inventory`) |
 | `GET /extensions?limit=100&offset=0&id=publisher.extension` | Inventory, exact ID filter, max page size 500 |
 | `POST /extensions/check` | Lookup up to 1,000 package keys; only stored regular files of the expected size are returned |
 | `POST /extensions` | Raw-byte VSIX upload |
@@ -72,6 +72,16 @@ Health endpoints `/health/live` and `/health/ready` are outside `/api/v1` and re
 
 `POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never deletes VSIX files or chooses between conflicting bytes. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records and counts by status.
 
+### Startup inventory scan
+
+After every start the manager scans and hashes the VSIX directory in the background, so it answers requests at once. `GET /status` reports the scan as `inventory`:
+
+```json
+{"state":"scanning","scanned":1200,"total":5000,"startedAt":"2026-09-28T06:00:00Z"}
+```
+
+`state` becomes `ready` when the scan finishes, or `failed` with an `error`. Until it is `ready`, `GET /extensions`, `POST /extensions`, `POST /extensions/check`, `GET /packages/download`, and `GET /uploads/by-key/{key}` answer 503: code `starting` with `Retry-After` during the scan, `scan_failed` after a failure. `POST /admin/reconcile` answers 503 `starting` during the scan; after a failure it retries the scan, and success lifts the restriction. Status, login, audit events, and sync reports stay available. `/health/ready` returns 200 `{"status":"starting"}` during the scan, `{"status":"ready"}` after it, and 503 if it failed.
+
 ## Errors and retry policy
 
 Errors contain `code`, `error`, and `requestId`:
@@ -86,6 +96,7 @@ Errors contain `code`, `error`, and `requestId`:
 | 422 | Invalid ZIP/manifests, identity, or checksum | Inspect original package |
 | 429 | Upload/login concurrency limit | Honor Retry-After |
 | 500/503 | State/service failure | Retry with bounded backoff |
+| 503 `starting` / `scan_failed` | Startup inventory scan still running, or failed | Honor Retry-After and watch `GET /status`; after a failure, check logs, then reconcile |
 | 507 | Staging or durability operation failed | Check disk, filesystem support, and permissions |
 
 A non-success response can occur after final file publication (for example, a database failure). Retrying identical content is safe. Per-file publication is atomic; an entire historical collection is not a single transaction. Independent successes remain available after another package fails.

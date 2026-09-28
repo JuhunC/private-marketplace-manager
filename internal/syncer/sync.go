@@ -217,14 +217,8 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 		if e = r.authenticate(); e != nil {
 			return report, e
 		}
-		var status struct {
-			APIVersion int `json:"apiVersion"`
-		}
-		if e = r.apiJSON(ctx, "GET", "/api/v1/status", nil, &status); e != nil {
+		if e = r.awaitManager(ctx); e != nil {
 			return report, e
-		}
-		if status.APIVersion != 1 {
-			return report, fmt.Errorf("unsupported manager API version %d", status.APIVersion)
 		}
 	}
 	// Every pass starts from the current list and authoritative remote inventory; local state is optional.
@@ -326,6 +320,46 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 		return report, fmt.Errorf("%d items failed; see report-%s.json", report.Failed, report.ID)
 	}
 	return report, nil
+}
+
+// scanPoll is how often a sync rechecks a manager that is still scanning its inventory after a restart.
+var scanPoll = 30 * time.Second
+
+// awaitManager checks API compatibility, then waits out the manager's startup inventory scan,
+// during which it refuses inventory lookups and uploads.
+func (r *Runner) awaitManager(ctx context.Context) error {
+	for {
+		var status struct {
+			APIVersion int `json:"apiVersion"`
+			Inventory  struct {
+				State   string `json:"state"`
+				Scanned int    `json:"scanned"`
+				Total   int    `json:"total"`
+				Error   string `json:"error"`
+			} `json:"inventory"`
+		}
+		if e := r.apiJSON(ctx, "GET", "/api/v1/status", nil, &status); e != nil {
+			return e
+		}
+		if status.APIVersion != 1 {
+			return fmt.Errorf("unsupported manager API version %d", status.APIVersion)
+		}
+		switch status.Inventory.State {
+		case "scanning":
+			fmt.Fprintf(r.Log, "Manager is scanning its inventory (%d of %d files); waiting\n", status.Inventory.Scanned, status.Inventory.Total)
+		case "failed":
+			return fmt.Errorf("manager inventory scan failed (%s); ask the operator to check the manager logs and reconcile storage", status.Inventory.Error)
+		default: // "ready", or a manager that scans before listening
+			return nil
+		}
+		timer := time.NewTimer(scanPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 func (r *Runner) transfer(ctx context.Context, a Artifact) error {
 	f, e := os.CreateTemp(r.Config.WorkDir, "download-*.part")
