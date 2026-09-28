@@ -155,6 +155,36 @@ func TestAnalyzeReportsStartupScan(t *testing.T) {
 	}
 }
 
+func TestAnalyzeWarnsAboutLowDiskSpace(t *testing.T) {
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health/ready":
+			io.WriteString(w, `{"status":"ready"}`)
+		case "/api/v1/status":
+			io.WriteString(w, `{"apiVersion":1,"inventory":{"state":"ready"},"storage":{"extensions":{"total":2199023255552,"used":2089072092774,"free":107374182400,"low":true}}}`)
+		case "/api/v1/extensions":
+			io.WriteString(w, `{"packages":[],"total":0}`)
+		case "/api/v1/sync-runs":
+			io.WriteString(w, `[]`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer manager.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if e := os.WriteFile(tokenFile, []byte(mcpTestToken), 0600); e != nil {
+		t.Fatal(e)
+	}
+	api, e := adminapi.New(adminapi.Config{ServerURL: manager.URL, TokenFile: tokenFile, AllowInsecureHTTP: true, MaxUploadBytes: 1 << 20})
+	if e != nil {
+		t.Fatal(e)
+	}
+	out := analyze(context.Background(), api)
+	if len(out.Findings) != 1 || out.Findings[0].Code != "low_disk_space" || out.Findings[0].Evidence != "100.0 GiB free of 2.0 TiB" {
+		t.Fatalf("low disk analysis: %+v", out.Findings)
+	}
+}
+
 func callToolJSON(t *testing.T, ctx context.Context, session *mcp.ClientSession, name string, args map[string]any) map[string]any {
 	t.Helper()
 	result, e := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})

@@ -591,3 +591,35 @@ func TestScanAcrossManyBatches(t *testing.T) {
 		t.Fatalf("queued keys left after a scan: %d", pending)
 	}
 }
+
+func TestStatusReportsDiskSpace(t *testing.T) {
+	_, h, _ := setup(t)
+	_, status := getJSON(t, h, "/api/v1/status", map[string]string{"Authorization": "Bearer " + testToken})
+	storage, _ := status["storage"].(map[string]any)
+	disk, _ := storage["extensions"].(map[string]any)
+	total, _ := disk["total"].(float64)
+	used, _ := disk["used"].(float64)
+	free, _ := disk["free"].(float64)
+	if total <= 0 || free <= 0 || used <= 0 || used+free > total {
+		t.Fatalf("extension disk: %v", storage)
+	}
+	if _, separate := storage["state"]; separate {
+		t.Fatalf("state shares the extension folder's filesystem and should not be listed twice: %v", storage)
+	}
+}
+
+func TestLowDiskSpaceRule(t *testing.T) {
+	for _, tt := range []struct {
+		total, free, reserve uint64
+		low                  bool
+	}{
+		{1000, 200, 10, false},
+		{1000, 99, 10, true},   // under a tenth free
+		{1000, 150, 400, true}, // cannot hold two of the largest uploads
+	} {
+		d := diskSpace{Total: tt.total, Free: tt.free}
+		if d.judge(tt.reserve); d.Low != tt.low {
+			t.Fatalf("%+v: low=%v", tt, d.Low)
+		}
+	}
+}

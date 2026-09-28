@@ -56,6 +56,20 @@ type Analysis struct {
 
 func boolPointer(v bool) *bool { return &v }
 
+// bytes formats a byte count with binary units, as the webpage does.
+func bytes(n float64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	i := 0
+	for n >= 1024 && i < len(units)-1 {
+		n /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%.0f %s", n, units[i])
+	}
+	return fmt.Sprintf("%.1f %s", n, units[i])
+}
+
 func readOnly(title string) *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{Title: title, ReadOnlyHint: true, IdempotentHint: true, DestructiveHint: boolPointer(false), OpenWorldHint: boolPointer(false)}
 }
@@ -210,6 +224,14 @@ func analyze(ctx context.Context, api *adminapi.Client) Analysis {
 		out.Healthy = false
 		addFinding(Finding{Severity: "critical", Code: "status_unavailable", Summary: "Authenticated manager status is unavailable", Evidence: e.Error(), SuggestedAction: "Check the server URL, TLS trust, API token, and manager logs."})
 		return out
+	}
+	storage, _ := out.Status["storage"].(map[string]any)
+	for _, disk := range []struct{ name, label string }{{"extensions", "extension folder"}, {"state", "state database"}} {
+		if d, _ := storage[disk.name].(map[string]any); d["low"] == true {
+			free, _ := d["free"].(float64)
+			total, _ := d["total"].(float64)
+			addFinding(Finding{Severity: "warning", Code: "low_disk_space", Summary: "The " + disk.label + " disk is running out of space", Evidence: fmt.Sprintf("%s free of %s", bytes(free), bytes(total)), SuggestedAction: "Free space or expand the volume before the next sync; each upload briefly needs room for a second copy of the VSIX."})
+		}
 	}
 	// Inventory endpoints refuse requests until the startup scan finishes, so there is nothing more to examine yet.
 	scan, _ := out.Status["inventory"].(map[string]any)

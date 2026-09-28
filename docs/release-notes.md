@@ -1,14 +1,12 @@
-Private Marketplace Manager v0.5.0 makes the startup "Verifying the extension folder" scan fast enough for libraries of millions of VSIX files by rehashing only files that are new or changed.
+Private Marketplace Manager v0.6.0 shows local disk space in the webpage, so administrators can see how much room is left for the extension library before syncs and uploads fail.
 
-- Change-based verification: the state database remembers each VSIX's size, modification time, and identity. A restart lists and stats every file but opens and hashes only new or changed ones, so scan time follows the number of files and the storage's metadata speed rather than the archive's total size.
-- Measured with 2 CPUs (matching the Compose default) on macOS APFS, whose per-file stat cost is higher than Linux ext4/xfs: a restart verifies 1 million unchanged files in about 13 seconds and 3 million in about 50 seconds, with about 12 MiB of heap. Deleted files are marked missing in the same pass. Database work is split into short batches, so health checks and other requests wait at most a few hundred milliseconds during a scan.
-- Upgrade: the first start after upgrading trusts files that v0.4.0 or earlier already verified when their size is unchanged, instead of rehashing the archive. In the same benchmark this one-time pass took about 34 seconds per million files.
-- Uploads record their file as they publish it, so newly uploaded packages are not rehashed at the next restart.
-- Full verification on demand: `POST /api/v1/admin/reconcile?verify=full`, or `manager_reconcile_storage` with `fullVerify` in `marketplace-mcp`, rehashes every file. Use it after restoring a backup or when files may have been edited outside the manager without changing their size and modification time, which routine scans do not detect.
-- Admin reconciliation now reports its changes from the scan itself instead of loading every record twice, and responds with `fullVerify`. Invalid or conflicting files are logged and audited when first found or changed rather than on every restart.
-- Manager image: `ghcr.io/juhunc/private-marketplace-manager:0.5.0` for Linux x64/ARM64.
+- Storage panel: below the summary cards, the Extension inventory page shows free space and total size of the disk holding the extension folder, the percentage used, and a bar splitting it into the VSIX library, other files, and free space. When the state database lives on a different disk, its free space is shown too.
+- Low-space warning: the panel turns amber when less than a tenth of the extension disk is free or less than twice the upload limit remains, because each upload briefly stages a second copy of the VSIX. The state disk is flagged below a tenth or 1 GiB free.
+- API: `GET /api/v1/status` adds `storage` with `total`, `used`, `free`, and `low` for the extension folder disk and, when separate, the state disk. `used` excludes blocks the filesystem reserves, as `df` does.
+- `marketplace-mcp`: `manager_health` includes disk space, and `manager_analyze` reports a `low_disk_space` warning.
+- Manager image: `ghcr.io/juhunc/private-marketplace-manager:0.6.0` for Linux x64/ARM64.
 
-Upgrading from v0.4.0: set `MANAGER_IMAGE` to the new tag (or use the updated Compose file) and restart. The state database gains its file table automatically; no manual migration is required. Clients from v0.3.0 onward keep working; update `marketplace-mcp` to use `fullVerify`.
+Upgrading from v0.5.0: set `MANAGER_IMAGE` to the new tag (or use the updated Compose file) and restart. No migration is required, and clients from v0.3.0 onward keep working; update `marketplace-mcp` for the disk-space finding. Upgrading from v0.4.0 or earlier also brings the v0.5.0 change-based startup verification; see the v0.5.0 notes. Keep external disk alerting in place; the webpage shows space only while someone is looking.
 
 Download the archive matching the tool, OS, and CPU, then verify `SHA256SUMS`. No Go, Python, or PowerShell installation is required. See the MCP guide before granting an MCP host access. Repair tools are additive but use the same API token as synchronization, so retain human approval in the MCP host.
 

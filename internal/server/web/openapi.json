@@ -34,7 +34,7 @@
         "summary": "Service status",
         "responses": {
           "200": {
-            "description": "Success: stored extension, version, package, and byte totals, records needing attention, and startup inventory scan progress in `inventory`"
+            "description": "Success: stored extension, version, package, and byte totals, records needing attention, startup inventory scan progress in `inventory`, and disk space in `storage`"
           },
           "401": {
             "description": "Invalid credential"

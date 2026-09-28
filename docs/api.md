@@ -46,7 +46,7 @@ Successful response:
 
 | Method and path | Purpose |
 |---|---|
-| `GET /status` | API version; stored `extensions`, `versions`, `packages`, and `bytes`; `attention` (records not stored); upload limit; startup scan progress (`inventory`) |
+| `GET /status` | API version; stored `extensions`, `versions`, `packages`, and `bytes`; `attention` (records not stored); upload limit; startup scan progress (`inventory`); disk space (`storage`) |
 | `GET /catalog?q=python&sort=versions&attention=true&limit=100&offset=0` | One entry per extension: latest version, version/platform/package counts, stored bytes, last update, and status counts. `q` matches part of an ID or display name; `sort` is `name`, `versions`, `size`, or `updated`; `attention=true` keeps extensions with missing, pending, or conflicting records |
 | `GET /catalog/{id}` | One extension's summary plus its versions, newest first by semantic version, each with its platform packages |
 | `GET /extensions?limit=100&offset=0&id=publisher.extension` | Inventory, exact ID filter, max page size 500 |
@@ -73,6 +73,8 @@ Response: `{"packages":{"<key>":{...package metadata...}}}`. Absent, missing, or
 Health endpoints `/health/live` and `/health/ready` are outside `/api/v1` and require no credentials. No endpoint accepts an arbitrary destination path, downloads arbitrary remote URLs, executes commands, or deletes VSIX files.
 
 `POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never deletes VSIX files or chooses between conflicting bytes. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records, counts by status, and `fullVerify`. Routine scans (startup and reconcile without `verify=full`) remember each file's size and modification time and rehash only new or changed files; `verify=full` rehashes every file, which takes time proportional to the archive's size.
+
+`GET /status` also reports disk space as `storage`: `extensions` describes the filesystem holding the extension folder, and `state` the state database's filesystem when it is a different one. Each has `total`, `used`, and `free` bytes (`free` is what the manager can use; `used` excludes blocks the filesystem reserves, as `df` does) and `low`. The extension disk is `low` when under a tenth is free or less than twice the upload limit remains, because an upload stages a full copy before publishing; the state disk is `low` under a tenth or 1 GiB free.
 
 ### Startup inventory scan
 
