@@ -117,6 +117,7 @@ type Report struct {
 	Discovered int        `json:"discovered"`
 	Stored     int        `json:"stored"`
 	Skipped    int        `json:"skipped"`
+	Deleted    int        `json:"deleted"` // versions an administrator deleted; not collected again
 	Failed     int        `json:"failed"`
 	Status     string     `json:"status"`
 	Errors     []Failure  `json:"errors"`
@@ -249,11 +250,16 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 			}
 			var check struct {
 				Packages map[string]vsix.Package `json:"packages"`
+				Deleted  []string                `json:"deleted"`
 			}
 			if err = r.apiJSON(ctx, "POST", "/api/v1/extensions/check", map[string]any{"keys": keys}, &check); err != nil {
 				report.Failed += len(batch)
 				report.Errors = append(report.Errors, Failure{id, err.Error()})
 				continue
+			}
+			deleted := map[string]bool{}
+			for _, k := range check.Deleted {
+				deleted[k] = true
 			}
 			jobs := make(chan Artifact)
 			var wg sync.WaitGroup
@@ -266,6 +272,12 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 						if p, ok := check.Packages[a.Key()]; ok && p.Status == "stored" && p.Prerelease == a.Prerelease {
 							mu.Lock()
 							report.Skipped++
+							mu.Unlock()
+							continue
+						}
+						if deleted[a.Key()] {
+							mu.Lock()
+							report.Deleted++
 							mu.Unlock()
 							continue
 						}

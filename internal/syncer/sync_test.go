@@ -127,6 +127,70 @@ func TestSyncWaitsForManagerInventoryScan(t *testing.T) {
 		t.Fatalf("failed scan did not stop the run: %v", e)
 	}
 }
+func TestSyncSkipsDeletedVersions(t *testing.T) {
+	var downloads atomic.Int32
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/gallery":
+			galleryHandler(t, w, r)
+		case strings.HasPrefix(r.URL.Path, "/asset/"):
+			downloads.Add(1)
+			w.Write(testutil.VSIX("one", "2.0.0", "linux-arm64", false, nil))
+		case r.URL.Path == "/api/v1/status":
+			io.WriteString(w, `{"apiVersion":1}`)
+		case r.URL.Path == "/api/v1/extensions/check":
+			io.WriteString(w, `{"packages":{},"deleted":["test.one@1.0.0@universal"]}`)
+		case r.URL.Path == "/api/v1/extensions":
+			if strings.Contains(r.URL.RawQuery, "restore") {
+				t.Error("sync must not restore deleted versions")
+			}
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(map[string]any{"package": map[string]any{"id": "test.one", "version": "2.0.0", "platform": "linux-arm64", "status": "stored", "sha256": vsixHash(t, testutil.VSIX("one", "2.0.0", "linux-arm64", false, nil))}})
+		case r.URL.Path == "/api/v1/sync-runs":
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer h.Close()
+	base := t.TempDir()
+	token := filepath.Join(base, "token")
+	os.WriteFile(token, []byte(strings.Repeat("x", 32)), 0600)
+	list := filepath.Join(base, "extensions.txt")
+	os.WriteFile(list, []byte("test.one\n"), 0600)
+	r, e := New(Config{ServerURL: h.URL, TokenFile: token, WorkDir: filepath.Join(base, "work"), Concurrency: 1, MaxDownloadBytes: 1 << 20, Retries: 1, AllowInsecureHTTP: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	r.Log = io.Discard
+	r.Gallery.Endpoint = h.URL + "/gallery"
+	r.Gallery.Client.Transport = transport(func(req *http.Request) (*http.Response, error) {
+		clone := req.Clone(req.Context())
+		if clone.URL.Host == "test.gallerycdn.vsassets.io" {
+			u := *clone.URL
+			u.Scheme, u.Host, u.Path = "http", strings.TrimPrefix(h.URL, "http://"), "/asset"+u.Path
+			clone.URL = &u
+		}
+		return http.DefaultTransport.RoundTrip(clone)
+	})
+	report, e := r.Run(context.Background(), list, false)
+	if e != nil || report.Stored != 1 || report.Deleted != 1 || downloads.Load() != 1 {
+		t.Fatalf("report %+v, %d downloads, %v", report, downloads.Load(), e)
+	}
+}
+
+func vsixHash(t *testing.T, b []byte) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "p.vsix")
+	os.WriteFile(f, b, 0600)
+	h, _, e := vsix.HashFile(f)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return h
+}
+
 func TestMigrationAndChangingList(t *testing.T) {
 	var mu sync.Mutex
 	stored := map[string]vsix.Package{}

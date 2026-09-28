@@ -199,7 +199,8 @@ func (c *Client) UploadVSIX(ctx context.Context, filename string) (UploadResult,
 		return result, e
 	}
 	defer f.Close()
-	q := url.Values{"id": {p.ID}, "version": {p.Version}, "platform": {p.Platform}}
+	// An administrator uploading a reviewed file may bring back a version that was deleted.
+	q := url.Values{"id": {p.ID}, "version": {p.Version}, "platform": {p.Platform}, "restore": {"true"}}
 	req, e := http.NewRequestWithContext(ctx, "POST", c.Config.ServerURL+"/api/v1/extensions?"+q.Encode(), f)
 	if e != nil {
 		return result, e

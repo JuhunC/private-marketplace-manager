@@ -85,7 +85,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 		Version:    version,
 		WebsiteURL: "https://github.com/JuhunC/private-marketplace-manager",
 	}, &mcp.ServerOptions{
-		Instructions: "Analyze with manager_analyze before repairs. Reconciliation never deletes VSIX files. Upload only a VSIX path the administrator has reviewed; the manager will validate it and never overwrite different bytes for an existing identity.",
+		Instructions: "Analyze with manager_analyze before repairs. Reconciliation only removes leftover files of versions an operator already deleted. Upload only a VSIX path the administrator has reviewed; the manager will validate it and never overwrite different bytes for an existing identity.",
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -105,7 +105,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "manager_inventory", Title: "List extension inventory", Annotations: readOnly("List extension inventory"),
-		Description: "List stored, missing, pending, or conflicting package records with version, platform, filename, hash, and provenance metadata.",
+		Description: "List stored, missing, pending, conflicting, or deleted package records with version, platform, filename, hash, and provenance metadata.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in InventoryInput) (*mcp.CallToolResult, any, error) {
 		if in.ID != "" && !vsix.ValidID(in.ID) {
 			return nil, nil, fmt.Errorf("id must be publisher.extension")
@@ -172,7 +172,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "manager_reconcile_storage", Title: "Reconcile storage inventory", Annotations: additive("Reconcile storage inventory"),
-		Description: "Rescan the designated VSIX directory, inventory valid external files, recover pending publications, and mark absent records missing. Files whose size and modification time are unchanged are trusted; set fullVerify to rehash every file. It never deletes VSIX files or resolves different-byte conflicts.",
+		Description: "Rescan the designated VSIX directory, inventory valid external files, recover pending publications, and mark absent records missing. Files whose size and modification time are unchanged are trusted; set fullVerify to rehash every file. It never resolves different-byte conflicts, and only removes leftover files of versions an operator already deleted.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ReconcileInput) (*mcp.CallToolResult, any, error) {
 		path := "/api/v1/admin/reconcile"
 		if in.FullVerify {
@@ -187,7 +187,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "manager_upload_vsix", Title: "Upload or restore a VSIX", Annotations: additive("Upload or restore a VSIX"),
-		Description: "Validate one local VSIX and upload it idempotently. This can restore a missing package; it never replaces different bytes for the same extension, version, and platform.",
+		Description: "Validate one local VSIX and upload it idempotently. This can restore a missing package or one an administrator deleted; it never replaces different bytes for the same extension, version, and platform.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UploadInput) (*mcp.CallToolResult, any, error) {
 		if strings.TrimSpace(in.Path) == "" {
 			return nil, nil, fmt.Errorf("path is required")
@@ -262,7 +262,7 @@ func analyze(ctx context.Context, api *adminapi.Client) Analysis {
 		out.InventoryExamined += len(page.Packages)
 		for _, p := range page.Packages {
 			out.StatusCounts[p.Status]++
-			if p.Status != "stored" {
+			if p.Status != "stored" && p.Status != "deleted" {
 				severity := "warning"
 				action := "Run manager_reconcile_storage, then re-upload the original VSIX if it remains missing."
 				if p.Status == "conflict" {

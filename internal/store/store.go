@@ -114,6 +114,64 @@ func (s *Store) InTx(f func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
+// MarkDeleted records that an administrator deleted these packages' files, keeping them in the index,
+// and queues them so the next scan removes any file left behind if the process stops mid-deletion.
+func (s *Store) MarkDeleted(packages []vsix.Package, at, detail string) error {
+	return s.InTx(func(tx *sql.Tx) error {
+		for _, p := range packages {
+			p.Status, p.DeletedAt = "deleted", at
+			if e := Put(tx, p); e != nil {
+				return e
+			}
+			if _, e := tx.Exec(`INSERT OR IGNORE INTO dirty VALUES(?)`, p.Key()); e != nil {
+				return e
+			}
+		}
+		return AuditIn(tx, "operator", "deleted_versions", detail)
+	})
+}
+
+// FilesHolding lists the VSIX files remembered for these package keys.
+func (s *Store) FilesHolding(keys []string) ([]string, error) {
+	var names []string
+	for low := 0; low < len(keys); low += 1000 {
+		batch := keys[low:min(low+1000, len(keys))]
+		args := make([]any, len(batch))
+		for i, k := range batch {
+			args[i] = k
+		}
+		rows, e := s.DB.Query(`SELECT name FROM files WHERE key IN (?`+strings.Repeat(",?", len(args)-1)+`)`, args...)
+		if e != nil {
+			return nil, e
+		}
+		for rows.Next() {
+			var name string
+			if e = rows.Scan(&name); e != nil {
+				rows.Close()
+				return nil, e
+			}
+			names = append(names, name)
+		}
+		rows.Close()
+		if e = rows.Err(); e != nil {
+			return nil, e
+		}
+	}
+	return names, nil
+}
+
+// ForgetFiles drops the remembered state of files that were removed.
+func (s *Store) ForgetFiles(names []string) error {
+	return s.InTx(func(tx *sql.Tx) error {
+		for _, name := range names {
+			if _, e := tx.Exec(`DELETE FROM files WHERE name=?`, name); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+}
+
 func (s *Store) StatusCounts() (map[string]int, error) {
 	rows, e := s.DB.Query(`SELECT status, count(*) FROM packages GROUP BY status`)
 	if e != nil {
@@ -172,19 +230,23 @@ func (s *Store) List(id string, limit, offset int) ([]vsix.Package, int, error) 
 	return out, total, rows.Err()
 }
 
-// Totals counts stored content and the package records that need attention.
+// Totals counts stored content, the package records that need attention (missing, pending, or conflict),
+// and those an administrator deleted.
 type Totals struct {
-	Extensions int   `json:"extensions"`
-	Versions   int   `json:"versions"`
-	Packages   int   `json:"packages"`
-	Bytes      int64 `json:"bytes"`
-	Attention  int   `json:"attention"`
+	Extensions   int   `json:"extensions"`
+	Versions     int   `json:"versions"`
+	Packages     int   `json:"packages"`
+	Bytes        int64 `json:"bytes"`
+	Attention    int   `json:"attention"`
+	Deleted      int   `json:"deleted"`
+	DeletedBytes int64 `json:"deletedBytes"`
 }
 
 func (s *Store) Totals() (Totals, error) {
 	var t Totals
 	e := s.DB.QueryRow(`SELECT count(DISTINCT CASE WHEN status='stored' THEN id END), count(DISTINCT CASE WHEN status='stored' THEN id||'@'||version END),
-	 coalesce(sum(status='stored'),0), coalesce(sum(CASE WHEN status='stored' THEN json_extract(payload,'$.size') END),0), coalesce(sum(status<>'stored'),0) FROM packages`).Scan(&t.Extensions, &t.Versions, &t.Packages, &t.Bytes, &t.Attention)
+	 coalesce(sum(status='stored'),0), coalesce(sum(CASE WHEN status='stored' THEN json_extract(payload,'$.size') END),0), coalesce(sum(status NOT IN ('stored','deleted')),0),
+	 coalesce(sum(status='deleted'),0), coalesce(sum(CASE WHEN status='deleted' THEN json_extract(payload,'$.size') END),0) FROM packages`).Scan(&t.Extensions, &t.Versions, &t.Packages, &t.Bytes, &t.Attention, &t.Deleted, &t.DeletedBytes)
 	return t, e
 }
 
@@ -228,11 +290,12 @@ func (s *Store) Catalog(q CatalogQuery) ([]Extension, int, error) {
 	}
 	having := ""
 	if q.Attention {
-		having = " HAVING sum(status<>'stored')>0"
+		having = " HAVING sum(status NOT IN ('stored','deleted'))>0"
 	}
-	groups := `SELECT id, count(DISTINCT version) AS versions, count(*) AS packages,
+	// Deleted versions stay listed in statusCounts but are not counted as versions, packages, or platforms.
+	groups := `SELECT id, count(DISTINCT CASE WHEN status<>'deleted' THEN version END) AS versions, sum(status<>'deleted') AS packages,
 	 coalesce(sum(CASE WHEN status='stored' THEN json_extract(payload,'$.size') END),0) AS bytes,
-	 coalesce(max(json_extract(payload,'$.storedAt')),'') AS updated, group_concat(DISTINCT platform) FROM packages` + where + " GROUP BY id" + having
+	 coalesce(max(json_extract(payload,'$.storedAt')),'') AS updated, coalesce(group_concat(DISTINCT CASE WHEN status<>'deleted' THEN platform END),'') FROM packages` + where + " GROUP BY id" + having
 	var total int
 	if e := s.DB.QueryRow("SELECT count(*) FROM ("+groups+")", args...).Scan(&total); e != nil {
 		return nil, 0, e
@@ -250,8 +313,11 @@ func (s *Store) Catalog(q CatalogQuery) ([]Extension, int, error) {
 			rows.Close()
 			return nil, 0, e
 		}
-		x.Platforms = strings.Split(platforms, ",")
-		sort.Strings(x.Platforms)
+		x.Platforms = []string{}
+		if platforms != "" {
+			x.Platforms = strings.Split(platforms, ",")
+			sort.Strings(x.Platforms)
+		}
 		x.StatusCounts = map[string]int{}
 		index[x.ID] = len(out)
 		out = append(out, x)
@@ -270,15 +336,19 @@ func (s *Store) Catalog(q CatalogQuery) ([]Extension, int, error) {
 		return nil, 0, e
 	}
 	defer rows.Close()
+	// The latest version is the newest one not deleted, or the newest deleted one if all are.
+	kept := make([]bool, len(out))
 	for rows.Next() {
 		var id, version, status, name string
 		if e = rows.Scan(&id, &version, &status, &name); e != nil {
 			return nil, 0, e
 		}
-		x := &out[index[id]]
+		i := index[id]
+		x := &out[i]
 		x.StatusCounts[status]++
-		if x.LatestVersion == "" || vsix.CompareVersions(version, x.LatestVersion) > 0 {
-			x.LatestVersion, x.DisplayName = version, name
+		live := status != "deleted"
+		if x.LatestVersion == "" || live && !kept[i] || live == kept[i] && vsix.CompareVersions(version, x.LatestVersion) > 0 {
+			x.LatestVersion, x.DisplayName, kept[i] = version, name, live
 		}
 	}
 	return out, total, rows.Err()

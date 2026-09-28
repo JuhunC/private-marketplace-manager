@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -228,6 +229,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
 	s.mux.HandleFunc("GET /api/v1/catalog", s.auth(s.afterScan(s.catalog)))
 	s.mux.HandleFunc("GET /api/v1/catalog/{id}", s.auth(s.afterScan(s.catalogEntry)))
+	s.mux.HandleFunc("POST /api/v1/catalog/{id}/delete", s.auth(s.afterScan(s.deleteVersions)))
 	s.mux.HandleFunc("GET /api/v1/extensions", s.auth(s.afterScan(s.list)))
 	s.mux.HandleFunc("POST /api/v1/extensions", s.auth(s.afterScan(s.upload)))
 	s.mux.HandleFunc("POST /api/v1/extensions/check", s.auth(s.afterScan(s.check)))
@@ -490,20 +492,23 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]vsix.Package{}
+	deleted := []string{}
 	for _, k := range b.Keys {
 		p, e := s.db.Get(k)
-		if e == nil && p.Status == "stored" {
+		if e == nil && p.Status == "deleted" {
+			deleted = append(deleted, k)
+		} else if e == nil && p.Status == "stored" {
 			info, err := os.Lstat(filepath.Join(s.cfg.Extensions, p.Filename))
 			if err == nil && info.Mode().IsRegular() && info.Size() == p.Size {
 				out[k] = p
 			}
 		}
 	}
-	jsonResponse(w, 200, map[string]any{"packages": out})
+	jsonResponse(w, 200, map[string]any{"packages": out, "deleted": deleted})
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	t, _ := s.db.Totals()
-	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "extensions": t.Extensions, "versions": t.Versions, "packages": t.Packages, "bytes": t.Bytes, "attention": t.Attention, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 1, "inventory": s.scanState(), "storage": s.storage()})
+	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "extensions": t.Extensions, "versions": t.Versions, "packages": t.Packages, "bytes": t.Bytes, "attention": t.Attention, "deleted": t.Deleted, "deletedBytes": t.DeletedBytes, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 1, "inventory": s.scanState(), "storage": s.storage()})
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	v, e := s.db.Events()
@@ -652,6 +657,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 			fail(w, 409, "content_conflict", "conflicting files require operator reconciliation")
 			return
 		}
+		if old.Status == "deleted" && r.URL.Query().Get("restore") != "true" {
+			fail(w, 409, "deleted", "an administrator deleted this version; upload it with restore=true to bring it back")
+			return
+		}
 		if old.SHA256 != p.SHA256 {
 			fail(w, 409, "content_conflict", "identity already exists with different bytes")
 			return
@@ -668,7 +677,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 				fail(w, 409, "content_conflict", "stored file changed outside manager")
 				return
 			}
-			old.Status = "stored"
+			old.Status, old.DeletedAt = "stored", ""
 			if e = s.db.Publish(old, info.ModTime().UnixNano()); e != nil {
 				fail(w, 500, "database", "cannot confirm existing file")
 				return
@@ -733,6 +742,90 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.db.Audit(actor(r), "stored", p.Key())
 	jsonResponse(w, 201, map[string]any{"package": p, "duplicate": false})
+}
+
+// deleteVersions removes the files of an extension's versions from the earliest through a given version,
+// or of every version, keeping the records as deleted so administrators and clients can see them and
+// marketplace-sync does not collect them again. dryRun reports what would be removed.
+func (s *Server) deleteVersions(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Through string `json:"through"`
+		All     bool   `json:"all"`
+		DryRun  bool   `json:"dryRun"`
+	}
+	e := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req)
+	if e != nil || req.All == (req.Through != "") || req.Through != "" && !vsix.ValidVersion(req.Through) {
+		fail(w, 400, "bad_request", `send {"through":"<version>"} or {"all":true}, optionally with "dryRun":true`)
+		return
+	}
+	id := strings.ToLower(r.PathValue("id"))
+	s.maintenance.RLock()
+	defer s.maintenance.RUnlock()
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	packages, _, e := s.db.List(id, 2147483647, 0)
+	if e != nil {
+		fail(w, 500, "database", "inventory unavailable")
+		return
+	}
+	if len(packages) == 0 {
+		fail(w, 404, "not_found", "extension not found")
+		return
+	}
+	var targets []vsix.Package
+	var keys, versions []string
+	var bytes int64
+	for _, p := range packages {
+		if p.Status != "deleted" && (req.All || vsix.CompareVersions(p.Version, req.Through) <= 0) {
+			targets, keys = append(targets, p), append(keys, p.Key())
+			if p.Status == "stored" {
+				bytes += p.Size
+			}
+			if !slices.Contains(versions, p.Version) {
+				versions = append(versions, p.Version)
+			}
+		}
+	}
+	slices.SortFunc(versions, vsix.CompareVersions)
+	result := map[string]any{"dryRun": req.DryRun, "versions": versions, "packages": len(targets), "bytes": bytes}
+	if req.DryRun || len(targets) == 0 {
+		jsonResponse(w, 200, result)
+		return
+	}
+	names, e := s.db.FilesHolding(keys)
+	if e != nil {
+		fail(w, 500, "database", "inventory unavailable")
+		return
+	}
+	for _, p := range targets {
+		if p.Filename != "" && !slices.Contains(names, p.Filename) {
+			names = append(names, p.Filename)
+		}
+	}
+	// Record the deletion before removing files: if the process stops midway, the next scan removes the rest.
+	detail, _ := json.Marshal(map[string]any{"id": id, "through": req.Through, "all": req.All, "versions": len(versions), "packages": len(targets), "bytes": bytes})
+	if e = s.db.MarkDeleted(targets, time.Now().UTC().Format(time.RFC3339), string(detail)); e != nil {
+		fail(w, 500, "database", "deletion could not be recorded")
+		return
+	}
+	var removed []string
+	remaining := 0
+	for _, name := range names {
+		if filepath.Base(name) != name {
+			continue
+		}
+		if e := os.Remove(filepath.Join(s.cfg.Extensions, name)); e == nil || os.IsNotExist(e) {
+			removed = append(removed, name)
+		} else {
+			slog.Warn("deleted version's file could not be removed; the next scan retries", "file", name, "error", e)
+			remaining++
+		}
+	}
+	if e = s.db.ForgetFiles(removed); e != nil {
+		slog.Warn("removed files are still remembered; the next scan forgets them", "error", e)
+	}
+	result["filesRemaining"] = remaining
+	jsonResponse(w, 200, result)
 }
 
 // Reconcile verifies the extension directory against the inventory and repairs records; it never removes

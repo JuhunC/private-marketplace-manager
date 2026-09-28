@@ -137,6 +137,62 @@
         }
       }
     },
+    "/api/v1/catalog/{id}/delete": {
+      "post": {
+        "summary": "Delete an extension's versions from disk, keeping them indexed as deleted",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "through": {
+                    "type": "string",
+                    "description": "Delete from the earliest version through this one (inclusive)"
+                  },
+                  "all": {
+                    "type": "boolean",
+                    "description": "Delete every version"
+                  },
+                  "dryRun": {
+                    "type": "boolean",
+                    "description": "Report what would be deleted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted (or previewed): versions, packages, bytes, filesRemaining"
+          },
+          "400": {
+            "description": "Send through or all"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "404": {
+            "description": "Extension not found"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
+          }
+        }
+      }
+    },
     "/api/v1/extensions": {
       "get": {
         "summary": "Paginated package inventory",
@@ -219,6 +275,14 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "restore",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Bring back a version an operator deleted"
           }
         ],
         "requestBody": {
@@ -240,7 +304,7 @@
             "description": "Validated file durably stored"
           },
           "409": {
-            "description": "Identity or idempotency conflict"
+            "description": "Identity or idempotency conflict, or a deleted version uploaded without restore=true"
           },
           "413": {
             "description": "Upload too large"

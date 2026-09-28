@@ -1,12 +1,13 @@
-Private Marketplace Manager v0.6.0 shows local disk space in the webpage, so administrators can see how much room is left for the extension library before syncs and uploads fail.
+Private Marketplace Manager v0.7.0 lets administrators delete old versions, or a whole extension, from disk to free space, while the inventory keeps those versions listed as deleted.
 
-- Storage panel: below the summary cards, the Extension inventory page shows free space and total size of the disk holding the extension folder, the percentage used, and a bar splitting it into the VSIX library, other files, and free space. When the state database lives on a different disk, its free space is shown too.
-- Low-space warning: the panel turns amber when less than a tenth of the extension disk is free or less than twice the upload limit remains, because each upload briefly stages a second copy of the VSIX. The state disk is flagged below a tenth or 1 GiB free.
-- API: `GET /api/v1/status` adds `storage` with `total`, `used`, `free`, and `low` for the extension folder disk and, when separate, the state disk. `used` excludes blocks the filesystem reserves, as `df` does.
-- `marketplace-mcp`: `manager_health` includes disk space, and `manager_analyze` reports a `low_disk_space` warning.
-- Manager image: `ghcr.io/juhunc/private-marketplace-manager:0.6.0` for Linux x64/ARM64.
+- Bulk deletion: on an extension's page, delete from its earliest version through a chosen version (semantic order, inclusive), or delete the entire extension. A confirmation first shows the versions, package files, and size that will be removed.
+- API: `POST /api/v1/catalog/{id}/delete` with `{"through":"1.5.1"}` or `{"all":true}`; add `"dryRun":true` for a preview. The response lists the versions, package count, freed bytes, and any files that could not be removed yet. Each deletion is recorded in the audit log as `deleted_versions`.
+- Index kept: deleted versions stay in the inventory with status `deleted` and a `deletedAt` time. The webpage shows them struck through without a download link; the catalog and `GET /api/v1/status` report them separately (`deleted`, `deletedBytes`) and no longer count them as versions, packages, platforms, or needing attention.
+- Not collected again: `POST /api/v1/extensions/check` returns deleted keys in `deleted`, and `marketplace-sync` skips them without downloading, counting them in its report's `deleted` field. Uploading a deleted version returns 409 `deleted` unless the request adds `restore=true`; uploads from the webpage and `marketplace-mcp` restore on purpose.
+- Safe interruption: the deletion is recorded before files are removed. If the manager stops midway, the next scan removes the remaining files holding exactly the deleted bytes; other files are never touched.
+- Manager image: `ghcr.io/juhunc/private-marketplace-manager:0.7.0` for Linux x64/ARM64.
 
-Upgrading from v0.5.0: set `MANAGER_IMAGE` to the new tag (or use the updated Compose file) and restart. No migration is required, and clients from v0.3.0 onward keep working; update `marketplace-mcp` for the disk-space finding. Upgrading from v0.4.0 or earlier also brings the v0.5.0 change-based startup verification; see the v0.5.0 notes. Keep external disk alerting in place; the webpage shows space only while someone is looking.
+Upgrading from v0.6.0: set `MANAGER_IMAGE` to the new tag (or use the updated Compose file) and restart; no migration is required. Update every scheduled `marketplace-sync` to v0.7.0 as well: older clients do not know about deleted versions, so they would download them again, have the upload refused, and report partial runs. The API token can now delete versions, so protect it as a privileged credential.
 
 Download the archive matching the tool, OS, and CPU, then verify `SHA256SUMS`. No Go, Python, or PowerShell installation is required. See the MCP guide before granting an MCP host access. Repair tools are additive but use the same API token as synchronization, so retain human approval in the MCP host.
 

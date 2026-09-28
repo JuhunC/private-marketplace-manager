@@ -48,6 +48,7 @@ Successful response:
 |---|---|
 | `GET /status` | API version; stored `extensions`, `versions`, `packages`, and `bytes`; `attention` (records not stored); upload limit; startup scan progress (`inventory`); disk space (`storage`) |
 | `GET /catalog?q=python&sort=versions&attention=true&limit=100&offset=0` | One entry per extension: latest version, version/platform/package counts, stored bytes, last update, and status counts. `q` matches part of an ID or display name; `sort` is `name`, `versions`, `size`, or `updated`; `attention=true` keeps extensions with missing, pending, or conflicting records |
+| `POST /catalog/{id}/delete` | Delete versions from disk: `{"through":"1.5.1"}` removes the earliest version through 1.5.1 (semantic order, inclusive) and `{"all":true}` every version. Add `"dryRun":true` for a preview. The response lists `versions`, `packages`, freed `bytes`, and `filesRemaining` |
 | `GET /catalog/{id}` | One extension's summary plus its versions, newest first by semantic version, each with its platform packages |
 | `GET /extensions?limit=100&offset=0&id=publisher.extension` | Inventory, exact ID filter, max page size 500 |
 | `POST /extensions/check` | Lookup up to 1,000 package keys; only stored regular files of the expected size are returned |
@@ -70,9 +71,13 @@ Batch lookup example:
 
 Response: `{"packages":{"<key>":{...package metadata...}}}`. Absent, missing, or conflicting packages are not returned. Lightweight lookup checks presence/type/size, not the entire file hash. Restart reconciliation rehashes new or changed files; `POST /admin/reconcile?verify=full` rehashes every file. Avoid out-of-band changes.
 
-Health endpoints `/health/live` and `/health/ready` are outside `/api/v1` and require no credentials. No endpoint accepts an arbitrary destination path, downloads arbitrary remote URLs, executes commands, or deletes VSIX files.
+Health endpoints `/health/live` and `/health/ready` are outside `/api/v1` and require no credentials. No endpoint accepts an arbitrary destination path, downloads arbitrary remote URLs, or executes commands. Only `POST /catalog/{id}/delete` removes VSIX files.
 
-`POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never deletes VSIX files or chooses between conflicting bytes. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records, counts by status, and `fullVerify`. Routine scans (startup and reconcile without `verify=full`) remember each file's size and modification time and rehash only new or changed files; `verify=full` rehashes every file, which takes time proportional to the archive's size.
+### Deleted versions
+
+Deleting versions removes their files from the extension folder but keeps their records with status `deleted` and a `deletedAt` time, so the webpage and API still list them. They are not counted as versions, packages, platforms, or needing attention; `GET /status` reports them as `deleted` and `deletedBytes`. `POST /extensions/check` returns requested keys that were deleted in `deleted`, and marketplace-sync skips them without downloading. Uploading a deleted version returns 409 `deleted` unless the request adds `restore=true`, which the webpage and `marketplace-mcp` upload do to bring a version back. If the manager stops before a deletion's files are gone, the next scan removes files holding exactly the deleted bytes. The action is recorded in the audit log as `deleted_versions`.
+
+`POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never chooses between conflicting bytes, and the only VSIX files it deletes are leftovers of versions an operator already deleted. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records, counts by status, and `fullVerify`. Routine scans (startup and reconcile without `verify=full`) remember each file's size and modification time and rehash only new or changed files; `verify=full` rehashes every file, which takes time proportional to the archive's size.
 
 `GET /status` also reports disk space as `storage`: `extensions` describes the filesystem holding the extension folder, and `state` the state database's filesystem when it is a different one. Each has `total`, `used`, and `free` bytes (`free` is what the manager can use; `used` excludes blocks the filesystem reserves, as `df` does) and `low`. The extension disk is `low` when under a tenth is free or less than twice the upload limit remains, because an upload stages a full copy before publishing; the state disk is `low` under a tenth or 1 GiB free.
 
@@ -95,7 +100,7 @@ Errors contain `code`, `error`, and `requestId`:
 | 400 | Invalid request/identifier/key | Fix input |
 | 401/403 | Authentication or browser origin/CSRF failure | Fix credential/origin; do not retry blindly |
 | 404 | Package/receipt unavailable | Reconcile or retry the original upload |
-| 409 | Different bytes at same identity, reused key, or publication conflict | Investigate; never overwrite automatically |
+| 409 | Different bytes at same identity, reused key, publication conflict, or `deleted` version | Investigate; never overwrite automatically. Add `restore=true` to bring back a deleted version |
 | 413 | Upload/body exceeds limit | Review size limits |
 | 422 | Invalid ZIP/manifests, identity, or checksum | Inspect original package |
 | 429 | Upload/login concurrency limit | Honor Retry-After |

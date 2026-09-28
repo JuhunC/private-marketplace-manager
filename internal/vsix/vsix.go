@@ -39,12 +39,14 @@ type Package struct {
 	StoredAt      string   `json:"storedAt,omitempty"`
 	Source        string   `json:"source,omitempty"`
 	Status        string   `json:"status"`
+	DeletedAt     string   `json:"deletedAt,omitempty"`
 }
 
 func ValidID(id string) bool {
 	p := strings.Split(id, ".")
 	return len(p) == 2 && component.MatchString(p[0]) && component.MatchString(p[1])
 }
+func ValidVersion(version string) bool { return versionRE.MatchString(version) }
 func ValidIdentity(id, version, platform string) bool {
 	return ValidID(id) && versionRE.MatchString(version) && platformRE.MatchString(platform)
 }

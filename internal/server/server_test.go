@@ -623,3 +623,102 @@ func TestLowDiskSpaceRule(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
+	s, h, c := setup(t)
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	files := map[string][]byte{}
+	for i, v := range []struct{ version, platform string }{{"1.0.0", ""}, {"1.5.0", "linux-x64"}, {"1.5.0", "win32-x64"}, {"1.5.1", ""}, {"1.10.0", ""}} {
+		b := testutil.VSIX("hello", v.version, v.platform, false, nil)
+		files[v.version+v.platform] = b
+		if code, _ := upload(t, h, b, fmt.Sprint(i)); code != 201 {
+			t.Fatal(code)
+		}
+	}
+	remove := func(body string) (int, map[string]any) {
+		t.Helper()
+		r := request(t, h, "POST", "/api/v1/catalog/test.hello/delete", []byte(body), auth)
+		defer r.Body.Close()
+		var out map[string]any
+		json.NewDecoder(r.Body).Decode(&out)
+		return r.StatusCode, out
+	}
+	for _, bad := range []string{`{}`, `{"through":"1.0.0","all":true}`, `{"through":"latest"}`} {
+		if code, _ := remove(bad); code != 400 {
+			t.Fatalf("%s accepted: %d", bad, code)
+		}
+	}
+	if r := request(t, h, "POST", "/api/v1/catalog/test.absent/delete", []byte(`{"all":true}`), auth); r.StatusCode != 404 {
+		t.Fatalf("unknown extension: %d", r.StatusCode)
+	}
+	code, preview := remove(`{"through":"1.5.1","dryRun":true}`)
+	if code != 200 || fmt.Sprint(preview["versions"]) != "[1.0.0 1.5.0 1.5.1]" || preview["packages"] != float64(4) {
+		t.Fatalf("preview: %d %v", code, preview)
+	}
+	if _, e := os.Stat(filepath.Join(c.Extensions, "test.hello-1.0.0-universal.vsix")); e != nil {
+		t.Fatal("a dry run removed a file")
+	}
+	if code, done := remove(`{"through":"1.5.1"}`); code != 200 || done["packages"] != float64(4) || done["filesRemaining"] != float64(0) {
+		t.Fatalf("delete: %d %v", code, done)
+	}
+	for _, name := range []string{"test.hello-1.0.0-universal.vsix", "test.hello-1.5.0-linux-x64.vsix", "test.hello-1.5.1-universal.vsix"} {
+		if _, e := os.Stat(filepath.Join(c.Extensions, name)); !os.IsNotExist(e) {
+			t.Fatalf("%s is still on disk", name)
+		}
+	}
+	p, _ := s.db.Get("test.hello@1.5.0@linux-x64")
+	if p.Status != "deleted" || p.DeletedAt == "" || p.SHA256 == "" {
+		t.Fatalf("deleted record: %+v", p)
+	}
+	_, entry := getJSON(t, h, "/api/v1/catalog/test.hello", auth)
+	x := entry["extension"].(map[string]any)
+	if x["versions"] != float64(1) || x["packages"] != float64(1) || x["latestVersion"] != "1.10.0" || x["statusCounts"].(map[string]any)["deleted"] != float64(4) {
+		t.Fatalf("summary after delete: %v", x)
+	}
+	if versions := entry["versions"].([]any); len(versions) != 4 {
+		t.Fatalf("deleted versions should stay listed: %v", versions)
+	}
+	_, status := getJSON(t, h, "/api/v1/status", auth)
+	if status["attention"] != float64(0) || status["deleted"] != float64(4) || status["packages"] != float64(1) {
+		t.Fatalf("status after delete: %v", status)
+	}
+	r := request(t, h, "POST", "/api/v1/extensions/check", []byte(`{"keys":["test.hello@1.0.0@universal","test.hello@1.10.0@universal"]}`), auth)
+	var check struct {
+		Packages map[string]vsix.Package `json:"packages"`
+		Deleted  []string                `json:"deleted"`
+	}
+	json.NewDecoder(r.Body).Decode(&check)
+	r.Body.Close()
+	if len(check.Packages) != 1 || fmt.Sprint(check.Deleted) != "[test.hello@1.0.0@universal]" {
+		t.Fatalf("check: %+v", check)
+	}
+	if r = request(t, h, "GET", "/api/v1/packages/download?key=test.hello@1.0.0@universal", nil, auth); r.StatusCode != 404 {
+		t.Fatalf("download of a deleted version: %d", r.StatusCode)
+	}
+	// A restart keeps the index; a file left by an interrupted deletion is removed.
+	os.WriteFile(filepath.Join(c.Extensions, "test.hello-1.5.1-universal.vsix"), files["1.5.1"], 0644)
+	if _, e := s.Reconcile(false, nil); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(filepath.Join(c.Extensions, "test.hello-1.5.1-universal.vsix")); !os.IsNotExist(e) || statusOf(t, s, "test.hello@1.5.1@universal") != "deleted" {
+		t.Fatal("scan should finish an interrupted deletion and keep the record deleted")
+	}
+	if code, v := upload(t, h, files["1.0.0"], "again"); code != 409 || v["code"] != "deleted" {
+		t.Fatalf("sync-style upload of a deleted version: %d %v", code, v)
+	}
+	r = request(t, h, "POST", "/api/v1/extensions?restore=true", files["1.0.0"], auth)
+	r.Body.Close()
+	if r.StatusCode != 201 || statusOf(t, s, "test.hello@1.0.0@universal") != "stored" {
+		t.Fatalf("restore: %d", r.StatusCode)
+	}
+	if p, _ = s.db.Get("test.hello@1.0.0@universal"); p.DeletedAt != "" {
+		t.Fatal("a restored version still carries its deletion time")
+	}
+	if code, done := remove(`{"all":true}`); code != 200 || done["packages"] != float64(2) {
+		t.Fatalf("delete all: %d %v", code, done)
+	}
+	_, status = getJSON(t, h, "/api/v1/status", auth)
+	if status["extensions"] != float64(0) || status["deleted"] != float64(5) {
+		t.Fatalf("status after deleting everything: %v", status)
+	}
+}

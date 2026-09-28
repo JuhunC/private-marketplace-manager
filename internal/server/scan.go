@@ -367,7 +367,7 @@ func (sc *scan) inventory(tx *sql.Tx, p vsix.Package, f *fileState) error {
 	if e != nil || old.SHA256 != p.SHA256 {
 		return e
 	}
-	p.Filename, p.Status, p.Managed, p.Source, p.StoredAt = old.Filename, old.Status, old.Managed, old.Source, old.StoredAt
+	p.Filename, p.Status, p.Managed, p.Source, p.StoredAt, p.DeletedAt = old.Filename, old.Status, old.Managed, old.Source, old.StoredAt, old.DeletedAt
 	if b, _ := json.Marshal(p); string(b) == payload {
 		return nil
 	}
@@ -493,6 +493,22 @@ func (sc *scan) settle() error {
 		}
 		e = sc.s.db.InTx(func(tx *sql.Tx) error {
 			for _, p := range records {
+				if p.Status == "deleted" {
+					// Finish a deletion interrupted before its files were removed. Other bytes under
+					// this identity are left in place.
+					for _, f := range held[p.Key()] {
+						if f.sha != p.SHA256 {
+							continue
+						}
+						if e := os.Remove(filepath.Join(sc.s.cfg.Extensions, f.name)); e != nil && !os.IsNotExist(e) {
+							return e
+						}
+						if _, e := tx.Exec(`DELETE FROM files WHERE name=?`, f.name); e != nil {
+							return e
+						}
+					}
+					continue
+				}
 				status, name := p.Status, p.Filename
 				p = settled(p, held[p.Key()])
 				if p.Status != status {
