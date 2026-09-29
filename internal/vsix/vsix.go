@@ -40,6 +40,7 @@ type Package struct {
 	Source        string   `json:"source,omitempty"`
 	Status        string   `json:"status"`
 	DeletedAt     string   `json:"deletedAt,omitempty"`
+	DeletedBy     string   `json:"deletedBy,omitempty"` // "operator", or "limit" for the version limit
 }
 
 func ValidID(id string) bool {

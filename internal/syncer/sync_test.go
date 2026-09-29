@@ -93,7 +93,7 @@ func TestSyncWaitsForManagerInventoryScan(t *testing.T) {
 	var calls atomic.Int32
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/status":
+		case "/api/v2/status":
 			state := "failed"
 			switch n := calls.Add(1); {
 			case n < 3:
@@ -101,8 +101,8 @@ func TestSyncWaitsForManagerInventoryScan(t *testing.T) {
 			case n == 3:
 				state = "ready"
 			}
-			fmt.Fprintf(w, `{"apiVersion":1,"inventory":{"state":%q,"scanned":1,"total":2,"error":"disk unavailable"}}`, state)
-		case "/api/v1/sync-runs":
+			fmt.Fprintf(w, `{"apiVersion":2,"inventory":{"state":%q,"scanned":1,"total":2,"error":"disk unavailable"}}`, state)
+		case "/api/v2/sync-runs":
 			io.WriteString(w, `{"ok":true}`)
 		default:
 			t.Errorf("unexpected %s before the scan finished", r.URL.Path)
@@ -136,18 +136,18 @@ func TestSyncSkipsDeletedVersions(t *testing.T) {
 		case strings.HasPrefix(r.URL.Path, "/asset/"):
 			downloads.Add(1)
 			w.Write(testutil.VSIX("one", "2.0.0", "linux-arm64", false, nil))
-		case r.URL.Path == "/api/v1/status":
-			io.WriteString(w, `{"apiVersion":1}`)
-		case r.URL.Path == "/api/v1/extensions/check":
+		case r.URL.Path == "/api/v2/status":
+			io.WriteString(w, `{"apiVersion":2}`)
+		case r.URL.Path == "/api/v2/extensions/check":
 			io.WriteString(w, `{"packages":{},"deleted":["test.one@1.0.0@universal"]}`)
-		case r.URL.Path == "/api/v1/extensions":
+		case r.URL.Path == "/api/v2/extensions":
 			if strings.Contains(r.URL.RawQuery, "restore") {
 				t.Error("sync must not restore deleted versions")
 			}
 			io.Copy(io.Discard, r.Body)
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{"package": map[string]any{"id": "test.one", "version": "2.0.0", "platform": "linux-arm64", "status": "stored", "sha256": vsixHash(t, testutil.VSIX("one", "2.0.0", "linux-arm64", false, nil))}})
-		case r.URL.Path == "/api/v1/sync-runs":
+		case r.URL.Path == "/api/v2/sync-runs":
 			io.WriteString(w, `{"ok":true}`)
 		default:
 			w.WriteHeader(404)
@@ -176,6 +176,63 @@ func TestSyncSkipsDeletedVersions(t *testing.T) {
 	})
 	report, e := r.Run(context.Background(), list, false)
 	if e != nil || report.Stored != 1 || report.Deleted != 1 || downloads.Load() != 1 {
+		t.Fatalf("report %+v, %d downloads, %v", report, downloads.Load(), e)
+	}
+}
+
+func TestSyncDownloadsOnlyVersionsWithinTheLimit(t *testing.T) {
+	var downloads atomic.Int32
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/gallery":
+			galleryHandler(t, w, r)
+		case strings.HasPrefix(r.URL.Path, "/asset/"):
+			downloads.Add(1)
+			w.Write(testutil.VSIX(strings.Split(r.URL.Path, "/")[2], "2.0.0", "linux-arm64", false, nil))
+		case r.URL.Path == "/api/v2/status":
+			io.WriteString(w, `{"apiVersion":2}`)
+		case r.URL.Path == "/api/v2/extensions/check":
+			io.WriteString(w, `{"packages":{},"deleted":[],"limits":{"test.one":1,"test.two":1}}`)
+		case r.URL.Path == "/api/v2/extensions":
+			io.Copy(io.Discard, r.Body)
+			if strings.Contains(r.URL.RawQuery, "id=test.one") {
+				// The limit was lowered while the run was in progress.
+				w.WriteHeader(409)
+				io.WriteString(w, `{"code":"retention","error":"older than the newest versions kept"}`)
+				return
+			}
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(map[string]any{"package": map[string]any{"id": "test.two", "version": "2.0.0", "platform": "linux-arm64", "status": "stored", "sha256": vsixHash(t, testutil.VSIX("two", "2.0.0", "linux-arm64", false, nil))}})
+		case r.URL.Path == "/api/v2/sync-runs":
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer h.Close()
+	base := t.TempDir()
+	token := filepath.Join(base, "token")
+	os.WriteFile(token, []byte(strings.Repeat("x", 32)), 0600)
+	list := filepath.Join(base, "extensions.txt")
+	os.WriteFile(list, []byte("test.one\ntest.two\n"), 0600)
+	r, e := New(Config{ServerURL: h.URL, TokenFile: token, WorkDir: filepath.Join(base, "work"), Concurrency: 1, MaxDownloadBytes: 1 << 20, Retries: 1, AllowInsecureHTTP: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	r.Log = io.Discard
+	r.Gallery.Endpoint = h.URL + "/gallery"
+	r.Gallery.Client.Transport = transport(func(req *http.Request) (*http.Response, error) {
+		clone := req.Clone(req.Context())
+		if clone.URL.Host == "test.gallerycdn.vsassets.io" {
+			u := *clone.URL
+			u.Scheme, u.Host, u.Path = "http", strings.TrimPrefix(h.URL, "http://"), "/asset"+u.Path
+			clone.URL = &u
+		}
+		return http.DefaultTransport.RoundTrip(clone)
+	})
+	// Each extension offers 2.0.0 and 1.0.0; with a limit of 1 only 2.0.0 is downloaded.
+	report, e := r.Run(context.Background(), list, false)
+	if e != nil || report.Stored != 1 || report.BeyondLimit != 3 || report.Failed != 0 || downloads.Load() != 2 {
 		t.Fatalf("report %+v, %d downloads, %v", report, downloads.Load(), e)
 	}
 }
@@ -219,13 +276,13 @@ func TestMigrationAndChangingList(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/api/v1/status":
-			io.WriteString(w, `{"apiVersion":1}`)
-		case "/api/v1/extensions/check":
+		case "/api/v2/status":
+			io.WriteString(w, `{"apiVersion":2}`)
+		case "/api/v2/extensions/check":
 			mu.Lock()
 			defer mu.Unlock()
 			json.NewEncoder(w).Encode(map[string]any{"packages": stored})
-		case "/api/v1/extensions":
+		case "/api/v2/extensions":
 			f, e := os.CreateTemp(t.TempDir(), "upload")
 			if e != nil {
 				t.Error(e)
@@ -244,7 +301,7 @@ func TestMigrationAndChangingList(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{"package": p})
-		case "/api/v1/sync-runs":
+		case "/api/v2/sync-runs":
 			io.WriteString(w, `{"ok":true}`)
 		default:
 			w.WriteHeader(404)

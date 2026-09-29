@@ -2,8 +2,8 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Private Marketplace Manager",
-    "version": "1.0",
-    "description": "Synchronous authenticated VSIX storage. See /guide.html for deployment and usage."
+    "version": "2.0",
+    "description": "Synchronous authenticated VSIX storage, API version 2. See /guide.html for deployment and usage."
   },
   "servers": [
     {
@@ -29,12 +29,12 @@
     }
   },
   "paths": {
-    "/api/v1/status": {
+    "/api/v2/status": {
       "get": {
         "summary": "Service status",
         "responses": {
           "200": {
-            "description": "Success: stored extension, version, package, and byte totals, records needing attention, startup inventory scan progress in `inventory`, and disk space in `storage`"
+            "description": "Success: stored extension, version, package, and byte totals, records needing attention, startup inventory scan progress in `inventory`, and disk space in `storage`, and the library version limit in `limit`"
           },
           "401": {
             "description": "Invalid credential"
@@ -42,7 +42,117 @@
         }
       }
     },
-    "/api/v1/catalog": {
+    "/api/v2/limit": {
+      "get": {
+        "summary": "The library version limit and the extensions with their own",
+        "responses": {
+          "200": {
+            "description": "keep (0 keeps every version) and extensionLimits"
+          },
+          "401": {
+            "description": "Invalid credential"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set the library version limit and delete older versions beyond it",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "keep"
+                ],
+                "properties": {
+                  "keep": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Newest versions kept per extension; 0 keeps every version"
+                  },
+                  "dryRun": {
+                    "type": "boolean",
+                    "description": "Report what the limit would delete"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied (or previewed): trimmed extensions, versions, packages, bytes, filesRemaining"
+          },
+          "400": {
+            "description": "keep must be 0 or more"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
+          }
+        }
+      }
+    },
+    "/api/v2/catalog/{id}/limit": {
+      "put": {
+        "summary": "Set one extension's version limit and delete older versions beyond it",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "keep"
+                ],
+                "properties": {
+                  "keep": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Newest versions kept; 0 keeps every version; null follows the library default"
+                  },
+                  "dryRun": {
+                    "type": "boolean",
+                    "description": "Report what the limit would delete"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Applied (or previewed): keep, keepSource, trimmed"
+          },
+          "400": {
+            "description": "keep must be null, 0, or more"
+          },
+          "401": {
+            "description": "Invalid credential"
+          },
+          "503": {
+            "description": "Startup inventory scan still running (`starting`; honor Retry-After) or failed (`scan_failed`)"
+          }
+        }
+      }
+    },
+    "/api/v2/catalog": {
       "get": {
         "summary": "Extensions grouped by ID with version, platform, package, size, and status counts",
         "parameters": [
@@ -108,7 +218,7 @@
         }
       }
     },
-    "/api/v1/catalog/{id}": {
+    "/api/v2/catalog/{id}": {
       "get": {
         "summary": "One extension with its versions, newest first, and their platform packages",
         "parameters": [
@@ -137,7 +247,7 @@
         }
       }
     },
-    "/api/v1/catalog/{id}/delete": {
+    "/api/v2/catalog/{id}/delete": {
       "post": {
         "summary": "Delete an extension's versions from disk, keeping them indexed as deleted",
         "parameters": [
@@ -193,7 +303,7 @@
         }
       }
     },
-    "/api/v1/extensions": {
+    "/api/v2/extensions": {
       "get": {
         "summary": "Paginated package inventory",
         "responses": {
@@ -304,7 +414,7 @@
             "description": "Validated file durably stored"
           },
           "409": {
-            "description": "Identity or idempotency conflict, or a deleted version uploaded without restore=true"
+            "description": "Identity or idempotency conflict, a deleted version uploaded without restore=true, or `retention`: older than the extension's version limit"
           },
           "413": {
             "description": "Upload too large"
@@ -324,7 +434,7 @@
         }
       }
     },
-    "/api/v1/extensions/check": {
+    "/api/v2/extensions/check": {
       "post": {
         "summary": "Check up to 1000 package keys",
         "responses": {
@@ -362,7 +472,7 @@
         }
       }
     },
-    "/api/v1/packages/download": {
+    "/api/v2/packages/download": {
       "get": {
         "summary": "Download original VSIX",
         "responses": {
@@ -388,7 +498,7 @@
         ]
       }
     },
-    "/api/v1/uploads/by-key/{key}": {
+    "/api/v2/uploads/by-key/{key}": {
       "get": {
         "summary": "Find an upload receipt",
         "responses": {
@@ -414,7 +524,7 @@
         ]
       }
     },
-    "/api/v1/audit-events": {
+    "/api/v2/audit-events": {
       "get": {
         "summary": "Recent audit events",
         "responses": {
@@ -427,7 +537,7 @@
         }
       }
     },
-    "/api/v1/sync-runs": {
+    "/api/v2/sync-runs": {
       "get": {
         "summary": "Recent sync reports",
         "responses": {
@@ -467,7 +577,7 @@
         }
       }
     },
-    "/api/v1/admin/reconcile": {
+    "/api/v2/admin/reconcile": {
       "post": {
         "summary": "Reconcile the VSIX directory and durable inventory",
         "responses": {
@@ -499,7 +609,7 @@
         ]
       }
     },
-    "/api/v1/me": {
+    "/api/v2/me": {
       "get": {
         "summary": "Current session",
         "responses": {
@@ -512,7 +622,7 @@
         }
       }
     },
-    "/api/v1/logout": {
+    "/api/v2/logout": {
       "post": {
         "summary": "End browser session",
         "responses": {
@@ -525,7 +635,7 @@
         }
       }
     },
-    "/api/v1/login": {
+    "/api/v2/login": {
       "post": {
         "security": [],
         "summary": "Operator login; Origin must equal PUBLIC_URL",

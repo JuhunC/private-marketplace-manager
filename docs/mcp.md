@@ -46,11 +46,13 @@ portable configuration shape is:
 On Windows, use the absolute path to `marketplace-mcp.exe` and escape backslashes
 in JSON. Never place the API token in MCP arguments or environment variables.
 
+`marketplace-mcp` v0.8.0 and later use manager API v2; upgrade the manager to v0.8.0 first.
+
 ## Tools
 
 | Tool | Effect |
 |---|---|
-| `manager_health` | Read liveness, readiness, API version, inventory size, disk space, and upload limit |
+| `manager_health` | Read liveness, readiness, API version, inventory size, disk space, version limit, and upload limit |
 | `manager_analyze` | Review readiness, up to 5,000 inventory records, and recent sync failures; return findings and repair guidance, including low disk space. While the startup inventory scan runs, or after it fails, report that instead |
 | `manager_inventory` | Read paginated package metadata, optionally for one extension ID |
 | `manager_check_packages` | Check selected records against current regular-file presence and size |
@@ -81,6 +83,6 @@ the configured size. Tool output never contains the API token.
    delete, quarantine, or select a winner.
 
 The manager API token currently grants inventory, report, upload, and reconcile
-access. v0.7.0 does not provide per-tool roles. Run the MCP server only for
+access. v0.8.0 does not provide per-tool roles. Run the MCP server only for
 trusted administrators, keep human approval enabled in the MCP host, and rotate
 the API token when retiring a workstation.

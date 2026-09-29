@@ -49,7 +49,7 @@ type attempt struct {
 	Until time.Time
 }
 
-// Startup scan states reported by /api/v1/status.
+// Startup scan states reported by /api/v2/status.
 const (
 	scanRunning = "scanning"
 	scanReady   = "ready"
@@ -223,22 +223,35 @@ func (s *Server) routes() {
 		jsonResponse(w, 200, map[string]string{"status": "alive", "version": buildinfo.Version})
 	})
 	s.mux.HandleFunc("GET /health/ready", s.ready)
-	s.mux.HandleFunc("POST /api/v1/login", s.login)
-	s.mux.HandleFunc("GET /api/v1/me", s.auth(s.me))
-	s.mux.HandleFunc("POST /api/v1/logout", s.auth(s.logout))
-	s.mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
-	s.mux.HandleFunc("GET /api/v1/catalog", s.auth(s.afterScan(s.catalog)))
-	s.mux.HandleFunc("GET /api/v1/catalog/{id}", s.auth(s.afterScan(s.catalogEntry)))
-	s.mux.HandleFunc("POST /api/v1/catalog/{id}/delete", s.auth(s.afterScan(s.deleteVersions)))
-	s.mux.HandleFunc("GET /api/v1/extensions", s.auth(s.afterScan(s.list)))
-	s.mux.HandleFunc("POST /api/v1/extensions", s.auth(s.afterScan(s.upload)))
-	s.mux.HandleFunc("POST /api/v1/extensions/check", s.auth(s.afterScan(s.check)))
-	s.mux.HandleFunc("GET /api/v1/packages/download", s.auth(s.afterScan(s.download)))
-	s.mux.HandleFunc("GET /api/v1/uploads/by-key/{key}", s.auth(s.afterScan(s.uploadStatus)))
-	s.mux.HandleFunc("GET /api/v1/audit-events", s.auth(s.events))
-	s.mux.HandleFunc("POST /api/v1/sync-runs", s.auth(s.report))
-	s.mux.HandleFunc("GET /api/v1/sync-runs", s.auth(s.runs))
-	s.mux.HandleFunc("POST /api/v1/admin/reconcile", s.auth(s.reconcile))
+	// API v1 was replaced: old clients read version 2 from their status call and stop instead of acting
+	// on a contract that changed; every other v1 path explains the move.
+	s.mux.HandleFunc("GET /api/v1/status", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, 200, map[string]any{"apiVersion": 2, "version": buildinfo.Version})
+	}))
+	for _, method := range []string{"GET", "POST"} {
+		s.mux.HandleFunc(method+" /api/v1/", func(w http.ResponseWriter, r *http.Request) {
+			fail(w, 410, "api_version", "API v1 was replaced by /api/v2 in manager v0.8.0; update the client")
+		})
+	}
+	s.mux.HandleFunc("POST /api/v2/login", s.login)
+	s.mux.HandleFunc("GET /api/v2/me", s.auth(s.me))
+	s.mux.HandleFunc("POST /api/v2/logout", s.auth(s.logout))
+	s.mux.HandleFunc("GET /api/v2/status", s.auth(s.status))
+	s.mux.HandleFunc("GET /api/v2/catalog", s.auth(s.afterScan(s.catalog)))
+	s.mux.HandleFunc("GET /api/v2/catalog/{id}", s.auth(s.afterScan(s.catalogEntry)))
+	s.mux.HandleFunc("POST /api/v2/catalog/{id}/delete", s.auth(s.afterScan(s.deleteVersions)))
+	s.mux.HandleFunc("PUT /api/v2/catalog/{id}/limit", s.auth(s.afterScan(s.setExtensionLimit)))
+	s.mux.HandleFunc("GET /api/v2/limit", s.auth(s.libraryLimit))
+	s.mux.HandleFunc("PUT /api/v2/limit", s.auth(s.afterScan(s.setLibraryLimit)))
+	s.mux.HandleFunc("GET /api/v2/extensions", s.auth(s.afterScan(s.list)))
+	s.mux.HandleFunc("POST /api/v2/extensions", s.auth(s.afterScan(s.upload)))
+	s.mux.HandleFunc("POST /api/v2/extensions/check", s.auth(s.afterScan(s.check)))
+	s.mux.HandleFunc("GET /api/v2/packages/download", s.auth(s.afterScan(s.download)))
+	s.mux.HandleFunc("GET /api/v2/uploads/by-key/{key}", s.auth(s.afterScan(s.uploadStatus)))
+	s.mux.HandleFunc("GET /api/v2/audit-events", s.auth(s.events))
+	s.mux.HandleFunc("POST /api/v2/sync-runs", s.auth(s.report))
+	s.mux.HandleFunc("GET /api/v2/sync-runs", s.auth(s.runs))
+	s.mux.HandleFunc("POST /api/v2/admin/reconcile", s.auth(s.reconcile))
 	sub, _ := fs.Sub(web, "web")
 	s.mux.Handle("GET /", http.FileServer(http.FS(sub)))
 }
@@ -277,7 +290,7 @@ func (s *Server) afterScan(next http.HandlerFunc) http.HandlerFunc {
 }
 func scanUnavailable(w http.ResponseWriter, scan scanStatus) {
 	if scan.State == scanFailed {
-		fail(w, 503, "scan_failed", "inventory scan failed; check the manager logs, then run POST /api/v1/admin/reconcile")
+		fail(w, 503, "scan_failed", "inventory scan failed; check the manager logs, then run POST /api/v2/admin/reconcile")
 		return
 	}
 	w.Header().Set("Retry-After", "30")
@@ -504,11 +517,24 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	jsonResponse(w, 200, map[string]any{"packages": out, "deleted": deleted})
+	limits := map[string]int{}
+	for _, k := range b.Keys {
+		id, _, _ := strings.Cut(k, "@")
+		if _, done := limits[id]; !done && vsix.ValidID(id) {
+			if keep, _, e := s.db.Keep(id); e == nil {
+				limits[id] = keep
+			}
+		}
+	}
+	jsonResponse(w, 200, map[string]any{"packages": out, "deleted": deleted, "limits": limits})
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	t, _ := s.db.Totals()
-	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "extensions": t.Extensions, "versions": t.Versions, "packages": t.Packages, "bytes": t.Bytes, "attention": t.Attention, "deleted": t.Deleted, "deletedBytes": t.DeletedBytes, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 1, "inventory": s.scanState(), "storage": s.storage()})
+	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "extensions": t.Extensions, "versions": t.Versions, "packages": t.Packages, "bytes": t.Bytes, "attention": t.Attention, "deleted": t.Deleted, "deletedBytes": t.DeletedBytes, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 2, "inventory": s.scanState(), "storage": s.storage(), "limit": s.libraryKeep()})
+}
+func (s *Server) libraryKeep() map[string]int {
+	keep, _ := s.db.KeepDefault()
+	return map[string]int{"keep": keep}
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	v, e := s.db.Events()
@@ -641,6 +667,22 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
+	keep, _, e := s.db.Keep(strings.ToLower(p.ID))
+	if e != nil {
+		fail(w, 500, "database", "cannot check the version limit")
+		return
+	}
+	if keep > 0 {
+		siblings, _, e := s.db.List(strings.ToLower(p.ID), 2147483647, 0)
+		if e != nil {
+			fail(w, 500, "database", "cannot check the version limit")
+			return
+		}
+		if outside(siblings, p.Version, keep) {
+			fail(w, 409, "retention", fmt.Sprintf("%s %s is older than the %d newest versions kept for this extension", p.ID, p.Version, keep))
+			return
+		}
+	}
 	if idem != "" {
 		sha, key, err := s.db.LookupUpload(idem)
 		if err == nil && (sha != p.SHA256 || key != p.Key()) {
@@ -741,6 +783,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = s.db.Audit(actor(r), "stored", p.Key())
+	// A newer version can push the oldest past the limit.
+	if _, e = s.trim(strings.ToLower(p.ID)); e != nil {
+		slog.Warn("version limit could not be applied after an upload; it applies at the next upload or limit change", "extension", p.ID, "error", e)
+	}
 	jsonResponse(w, 201, map[string]any{"package": p, "duplicate": false})
 }
 
@@ -773,11 +819,11 @@ func (s *Server) deleteVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var targets []vsix.Package
-	var keys, versions []string
+	var versions []string
 	var bytes int64
 	for _, p := range packages {
 		if p.Status != "deleted" && (req.All || vsix.CompareVersions(p.Version, req.Through) <= 0) {
-			targets, keys = append(targets, p), append(keys, p.Key())
+			targets = append(targets, p)
 			if p.Status == "stored" {
 				bytes += p.Size
 			}
@@ -792,37 +838,11 @@ func (s *Server) deleteVersions(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, 200, result)
 		return
 	}
-	names, e := s.db.FilesHolding(keys)
-	if e != nil {
-		fail(w, 500, "database", "inventory unavailable")
-		return
-	}
-	for _, p := range targets {
-		if p.Filename != "" && !slices.Contains(names, p.Filename) {
-			names = append(names, p.Filename)
-		}
-	}
-	// Record the deletion before removing files: if the process stops midway, the next scan removes the rest.
 	detail, _ := json.Marshal(map[string]any{"id": id, "through": req.Through, "all": req.All, "versions": len(versions), "packages": len(targets), "bytes": bytes})
-	if e = s.db.MarkDeleted(targets, time.Now().UTC().Format(time.RFC3339), string(detail)); e != nil {
+	remaining, e := s.remove(targets, "operator", string(detail))
+	if e != nil {
 		fail(w, 500, "database", "deletion could not be recorded")
 		return
-	}
-	var removed []string
-	remaining := 0
-	for _, name := range names {
-		if filepath.Base(name) != name {
-			continue
-		}
-		if e := os.Remove(filepath.Join(s.cfg.Extensions, name)); e == nil || os.IsNotExist(e) {
-			removed = append(removed, name)
-		} else {
-			slog.Warn("deleted version's file could not be removed; the next scan retries", "file", name, "error", e)
-			remaining++
-		}
-	}
-	if e = s.db.ForgetFiles(removed); e != nil {
-		slog.Warn("removed files are still remembered; the next scan forgets them", "error", e)
 	}
 	result["filesRemaining"] = remaining
 	jsonResponse(w, 200, result)

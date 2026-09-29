@@ -65,7 +65,7 @@ func getJSON(t *testing.T, h *httptest.Server, path string, headers map[string]s
 }
 func upload(t *testing.T, h *httptest.Server, b []byte, key string) (int, map[string]any) {
 	t.Helper()
-	r := request(t, h, "POST", "/api/v1/extensions", b, map[string]string{"Authorization": "Bearer " + testToken, "Idempotency-Key": key})
+	r := request(t, h, "POST", "/api/v2/extensions", b, map[string]string{"Authorization": "Bearer " + testToken, "Idempotency-Key": key})
 	defer r.Body.Close()
 	var result map[string]any
 	json.NewDecoder(r.Body).Decode(&result)
@@ -109,7 +109,7 @@ func TestUploadPreservesVersionsAndRetries(t *testing.T) {
 func TestUploadValidationAndAuthentication(t *testing.T) {
 	_, h, _ := setup(t)
 	b := testutil.VSIX("hello", "1.0.0", "", false, nil)
-	r := request(t, h, "POST", "/api/v1/extensions", b, nil)
+	r := request(t, h, "POST", "/api/v2/extensions", b, nil)
 	r.Body.Close()
 	if r.StatusCode != 401 {
 		t.Fatal(r.StatusCode)
@@ -120,10 +120,10 @@ func TestUploadValidationAndAuthentication(t *testing.T) {
 		headers map[string]string
 		want    int
 	}{
-		{"/api/v1/extensions", []byte("invalid zip"), nil, 422},
-		{"/api/v1/extensions?id=test.wrong", b, nil, 422},
-		{"/api/v1/extensions", b, map[string]string{"X-Content-SHA256": "bad"}, 422},
-		{"/api/v1/extensions", make([]byte, (1<<20)+1), nil, 413},
+		{"/api/v2/extensions", []byte("invalid zip"), nil, 422},
+		{"/api/v2/extensions?id=test.wrong", b, nil, 422},
+		{"/api/v2/extensions", b, map[string]string{"X-Content-SHA256": "bad"}, 422},
+		{"/api/v2/extensions", make([]byte, (1<<20)+1), nil, 413},
 	} {
 		headers := map[string]string{"Authorization": "Bearer " + testToken}
 		for k, v := range tt.headers {
@@ -139,12 +139,12 @@ func TestUploadValidationAndAuthentication(t *testing.T) {
 }
 func TestCookieOriginAndCSRF(t *testing.T) {
 	_, h, _ := setup(t)
-	r := request(t, h, "POST", "/api/v1/login", []byte(`{"password":"a-long-test-password"}`), map[string]string{"Origin": "https://evil.example"})
+	r := request(t, h, "POST", "/api/v2/login", []byte(`{"password":"a-long-test-password"}`), map[string]string{"Origin": "https://evil.example"})
 	r.Body.Close()
 	if r.StatusCode != 403 {
 		t.Fatal(r.StatusCode)
 	}
-	r = request(t, h, "POST", "/api/v1/login", []byte(`{"password":"a-long-test-password"}`), map[string]string{"Origin": "http://localhost"})
+	r = request(t, h, "POST", "/api/v2/login", []byte(`{"password":"a-long-test-password"}`), map[string]string{"Origin": "http://localhost"})
 	defer r.Body.Close()
 	if r.StatusCode != 200 {
 		t.Fatal(r.StatusCode)
@@ -153,13 +153,13 @@ func TestCookieOriginAndCSRF(t *testing.T) {
 	json.NewDecoder(r.Body).Decode(&body)
 	cookie := r.Cookies()[0]
 	headers := map[string]string{"Cookie": cookie.String(), "Origin": "http://localhost"}
-	r = request(t, h, "POST", "/api/v1/logout", nil, headers)
+	r = request(t, h, "POST", "/api/v2/logout", nil, headers)
 	r.Body.Close()
 	if r.StatusCode != 403 {
 		t.Fatal("missing CSRF accepted")
 	}
 	headers["X-CSRF-Token"] = body["csrfToken"]
-	r = request(t, h, "POST", "/api/v1/logout", nil, headers)
+	r = request(t, h, "POST", "/api/v2/logout", nil, headers)
 	r.Body.Close()
 	if r.StatusCode != 200 {
 		t.Fatal(r.StatusCode)
@@ -231,7 +231,7 @@ func TestCheckDoesNotSkipMissingFile(t *testing.T) {
 	_, h, c := setup(t)
 	upload(t, h, testutil.VSIX("hello", "1.0.0", "", false, nil), "key")
 	os.Remove(filepath.Join(c.Extensions, "test.hello-1.0.0-universal.vsix"))
-	r := request(t, h, "POST", "/api/v1/extensions/check", []byte(`{"keys":["test.hello@1.0.0@universal"]}`), map[string]string{"Authorization": "Bearer " + testToken})
+	r := request(t, h, "POST", "/api/v2/extensions/check", []byte(`{"keys":["test.hello@1.0.0@universal"]}`), map[string]string{"Authorization": "Bearer " + testToken})
 	defer r.Body.Close()
 	var b struct {
 		Packages map[string]vsix.Package `json:"packages"`
@@ -255,7 +255,7 @@ func TestAdminReconcileRepairsMissingAndInventoriesNewFiles(t *testing.T) {
 	if e := os.WriteFile(filepath.Join(c.Extensions, "external.vsix"), second, 0644); e != nil {
 		t.Fatal(e)
 	}
-	r := request(t, h, "POST", "/api/v1/admin/reconcile", nil, map[string]string{"Authorization": "Bearer " + testToken})
+	r := request(t, h, "POST", "/api/v2/admin/reconcile", nil, map[string]string{"Authorization": "Bearer " + testToken})
 	defer r.Body.Close()
 	if r.StatusCode != 200 {
 		body, _ := io.ReadAll(r.Body)
@@ -271,7 +271,7 @@ func TestAdminReconcileRepairsMissingAndInventoriesNewFiles(t *testing.T) {
 	if result.Changed != 2 || result.Counts["stored"] != 1 || result.Counts["missing"] != 1 {
 		t.Fatalf("unexpected reconcile result: %+v", result)
 	}
-	r = request(t, h, "POST", "/api/v1/admin/reconcile", nil, nil)
+	r = request(t, h, "POST", "/api/v2/admin/reconcile", nil, nil)
 	r.Body.Close()
 	if r.StatusCode != 401 {
 		t.Fatalf("unauthenticated reconcile: %d", r.StatusCode)
@@ -293,7 +293,7 @@ func TestInventoryWaitsForBackgroundStartupScan(t *testing.T) {
 	if code, body := getJSON(t, h, "/health/ready", nil); code != 200 || body["status"] != "starting" {
 		t.Fatalf("readiness while scanning: %d %v", code, body)
 	}
-	for _, path := range []string{"POST /api/v1/extensions", "GET /api/v1/extensions", "POST /api/v1/extensions/check", "GET /api/v1/packages/download?key=test.hello@1.0.0@universal", "GET /api/v1/uploads/by-key/any", "POST /api/v1/admin/reconcile"} {
+	for _, path := range []string{"POST /api/v2/extensions", "GET /api/v2/extensions", "POST /api/v2/extensions/check", "GET /api/v2/packages/download?key=test.hello@1.0.0@universal", "GET /api/v2/uploads/by-key/any", "POST /api/v2/admin/reconcile"} {
 		method, target, _ := strings.Cut(path, " ")
 		r := request(t, h, method, target, nil, auth)
 		var body map[string]string
@@ -303,7 +303,7 @@ func TestInventoryWaitsForBackgroundStartupScan(t *testing.T) {
 			t.Fatalf("%s while scanning: %d %v", path, r.StatusCode, body)
 		}
 	}
-	code, status := getJSON(t, h, "/api/v1/status", auth)
+	code, status := getJSON(t, h, "/api/v2/status", auth)
 	if scan, _ := status["inventory"].(map[string]any); code != 200 || scan["state"] != "scanning" {
 		t.Fatalf("status while scanning: %d %v", code, status)
 	}
@@ -312,10 +312,10 @@ func TestInventoryWaitsForBackgroundStartupScan(t *testing.T) {
 	if code, body := getJSON(t, h, "/health/ready", nil); code != 200 || body["status"] != "ready" {
 		t.Fatalf("readiness after scan: %d %v", code, body)
 	}
-	if code, list := getJSON(t, h, "/api/v1/extensions", auth); code != 200 || list["total"] != float64(1) {
+	if code, list := getJSON(t, h, "/api/v2/extensions", auth); code != 200 || list["total"] != float64(1) {
 		t.Fatalf("inventory after scan: %d %v", code, list)
 	}
-	_, status = getJSON(t, h, "/api/v1/status", auth)
+	_, status = getJSON(t, h, "/api/v2/status", auth)
 	if scan, _ := status["inventory"].(map[string]any); scan["state"] != "ready" || scan["scanned"] != float64(1) || scan["total"] != float64(1) {
 		t.Fatalf("status after scan: %v", status)
 	}
@@ -336,14 +336,14 @@ func TestFailedStartupScanRecoversThroughReconcile(t *testing.T) {
 	if code, body := getJSON(t, h, "/health/ready", nil); code != 503 {
 		t.Fatalf("readiness after failed scan: %d %v", code, body)
 	}
-	if code, body := getJSON(t, h, "/api/v1/extensions", auth); code != 503 || body["code"] != "scan_failed" {
+	if code, body := getJSON(t, h, "/api/v2/extensions", auth); code != 503 || body["code"] != "scan_failed" {
 		t.Fatalf("inventory after failed scan: %d %v", code, body)
 	}
-	_, status := getJSON(t, h, "/api/v1/status", auth)
+	_, status := getJSON(t, h, "/api/v2/status", auth)
 	if scan, _ := status["inventory"].(map[string]any); scan["state"] != "failed" || scan["error"] == nil {
 		t.Fatalf("status after failed scan: %v", status)
 	}
-	r := request(t, h, "POST", "/api/v1/admin/reconcile", nil, auth)
+	r := request(t, h, "POST", "/api/v2/admin/reconcile", nil, auth)
 	r.Body.Close()
 	if r.StatusCode != 200 {
 		t.Fatalf("reconcile retry: %d", r.StatusCode)
@@ -351,7 +351,7 @@ func TestFailedStartupScanRecoversThroughReconcile(t *testing.T) {
 	if code, body := getJSON(t, h, "/health/ready", nil); code != 200 || body["status"] != "ready" {
 		t.Fatalf("readiness after reconcile: %d %v", code, body)
 	}
-	if code, _ := getJSON(t, h, "/api/v1/extensions", auth); code != 200 {
+	if code, _ := getJSON(t, h, "/api/v2/extensions", auth); code != 200 {
 		t.Fatalf("inventory after reconcile: %d", code)
 	}
 }
@@ -375,7 +375,7 @@ func TestCatalogGroupsVersionsPerExtension(t *testing.T) {
 	auth := map[string]string{"Authorization": "Bearer " + testToken}
 	catalog := func(query string) (int, []map[string]any, float64) {
 		t.Helper()
-		code, body := getJSON(t, h, "/api/v1/catalog"+query, auth)
+		code, body := getJSON(t, h, "/api/v2/catalog"+query, auth)
 		list, _ := body["extensions"].([]any)
 		out := []map[string]any{}
 		for _, x := range list {
@@ -413,7 +413,7 @@ func TestCatalogGroupsVersionsPerExtension(t *testing.T) {
 	if code, _, _ = catalog("?sort=random"); code != 400 {
 		t.Fatalf("unknown sort: %d", code)
 	}
-	code, detail := getJSON(t, h, "/api/v1/catalog/TEST.HELLO", auth)
+	code, detail := getJSON(t, h, "/api/v2/catalog/TEST.HELLO", auth)
 	versions, _ := detail["versions"].([]any)
 	if code != 200 || len(versions) != 3 {
 		t.Fatalf("detail: %d %v", code, detail)
@@ -428,7 +428,7 @@ func TestCatalogGroupsVersionsPerExtension(t *testing.T) {
 	if v := versions[1].(map[string]any); len(v["packages"].([]any)) != 2 || v["prerelease"] != false || versions[0].(map[string]any)["prerelease"] != true {
 		t.Fatalf("version grouping: %v", versions)
 	}
-	if code, _ = getJSON(t, h, "/api/v1/catalog/test.absent", auth); code != 404 {
+	if code, _ = getJSON(t, h, "/api/v2/catalog/test.absent", auth); code != 404 {
 		t.Fatalf("absent extension: %d", code)
 	}
 	if e := os.Remove(filepath.Join(c.Extensions, "test.other-0.1.0-universal.vsix")); e != nil {
@@ -440,7 +440,7 @@ func TestCatalogGroupsVersionsPerExtension(t *testing.T) {
 	if _, list, _ = catalog("?attention=true"); len(list) != 1 || list[0]["id"] != "test.other" || list[0]["statusCounts"].(map[string]any)["missing"] != float64(1) {
 		t.Fatalf("attention filter: %v", list)
 	}
-	_, status := getJSON(t, h, "/api/v1/status", auth)
+	_, status := getJSON(t, h, "/api/v2/status", auth)
 	if status["extensions"] != float64(1) || status["versions"] != float64(3) || status["packages"] != float64(4) || status["attention"] != float64(1) {
 		t.Fatalf("status totals: %v", status)
 	}
@@ -594,7 +594,7 @@ func TestScanAcrossManyBatches(t *testing.T) {
 
 func TestStatusReportsDiskSpace(t *testing.T) {
 	_, h, _ := setup(t)
-	_, status := getJSON(t, h, "/api/v1/status", map[string]string{"Authorization": "Bearer " + testToken})
+	_, status := getJSON(t, h, "/api/v2/status", map[string]string{"Authorization": "Bearer " + testToken})
 	storage, _ := status["storage"].(map[string]any)
 	disk, _ := storage["extensions"].(map[string]any)
 	total, _ := disk["total"].(float64)
@@ -637,7 +637,7 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 	}
 	remove := func(body string) (int, map[string]any) {
 		t.Helper()
-		r := request(t, h, "POST", "/api/v1/catalog/test.hello/delete", []byte(body), auth)
+		r := request(t, h, "POST", "/api/v2/catalog/test.hello/delete", []byte(body), auth)
 		defer r.Body.Close()
 		var out map[string]any
 		json.NewDecoder(r.Body).Decode(&out)
@@ -648,7 +648,7 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 			t.Fatalf("%s accepted: %d", bad, code)
 		}
 	}
-	if r := request(t, h, "POST", "/api/v1/catalog/test.absent/delete", []byte(`{"all":true}`), auth); r.StatusCode != 404 {
+	if r := request(t, h, "POST", "/api/v2/catalog/test.absent/delete", []byte(`{"all":true}`), auth); r.StatusCode != 404 {
 		t.Fatalf("unknown extension: %d", r.StatusCode)
 	}
 	code, preview := remove(`{"through":"1.5.1","dryRun":true}`)
@@ -670,7 +670,7 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 	if p.Status != "deleted" || p.DeletedAt == "" || p.SHA256 == "" {
 		t.Fatalf("deleted record: %+v", p)
 	}
-	_, entry := getJSON(t, h, "/api/v1/catalog/test.hello", auth)
+	_, entry := getJSON(t, h, "/api/v2/catalog/test.hello", auth)
 	x := entry["extension"].(map[string]any)
 	if x["versions"] != float64(1) || x["packages"] != float64(1) || x["latestVersion"] != "1.10.0" || x["statusCounts"].(map[string]any)["deleted"] != float64(4) {
 		t.Fatalf("summary after delete: %v", x)
@@ -678,11 +678,11 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 	if versions := entry["versions"].([]any); len(versions) != 4 {
 		t.Fatalf("deleted versions should stay listed: %v", versions)
 	}
-	_, status := getJSON(t, h, "/api/v1/status", auth)
+	_, status := getJSON(t, h, "/api/v2/status", auth)
 	if status["attention"] != float64(0) || status["deleted"] != float64(4) || status["packages"] != float64(1) {
 		t.Fatalf("status after delete: %v", status)
 	}
-	r := request(t, h, "POST", "/api/v1/extensions/check", []byte(`{"keys":["test.hello@1.0.0@universal","test.hello@1.10.0@universal"]}`), auth)
+	r := request(t, h, "POST", "/api/v2/extensions/check", []byte(`{"keys":["test.hello@1.0.0@universal","test.hello@1.10.0@universal"]}`), auth)
 	var check struct {
 		Packages map[string]vsix.Package `json:"packages"`
 		Deleted  []string                `json:"deleted"`
@@ -692,7 +692,7 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 	if len(check.Packages) != 1 || fmt.Sprint(check.Deleted) != "[test.hello@1.0.0@universal]" {
 		t.Fatalf("check: %+v", check)
 	}
-	if r = request(t, h, "GET", "/api/v1/packages/download?key=test.hello@1.0.0@universal", nil, auth); r.StatusCode != 404 {
+	if r = request(t, h, "GET", "/api/v2/packages/download?key=test.hello@1.0.0@universal", nil, auth); r.StatusCode != 404 {
 		t.Fatalf("download of a deleted version: %d", r.StatusCode)
 	}
 	// A restart keeps the index; a file left by an interrupted deletion is removed.
@@ -706,7 +706,7 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 	if code, v := upload(t, h, files["1.0.0"], "again"); code != 409 || v["code"] != "deleted" {
 		t.Fatalf("sync-style upload of a deleted version: %d %v", code, v)
 	}
-	r = request(t, h, "POST", "/api/v1/extensions?restore=true", files["1.0.0"], auth)
+	r = request(t, h, "POST", "/api/v2/extensions?restore=true", files["1.0.0"], auth)
 	r.Body.Close()
 	if r.StatusCode != 201 || statusOf(t, s, "test.hello@1.0.0@universal") != "stored" {
 		t.Fatalf("restore: %d", r.StatusCode)
@@ -717,8 +717,120 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 	if code, done := remove(`{"all":true}`); code != 200 || done["packages"] != float64(2) {
 		t.Fatalf("delete all: %d %v", code, done)
 	}
-	_, status = getJSON(t, h, "/api/v1/status", auth)
+	_, status = getJSON(t, h, "/api/v2/status", auth)
 	if status["extensions"] != float64(0) || status["deleted"] != float64(5) {
 		t.Fatalf("status after deleting everything: %v", status)
+	}
+}
+
+func TestVersionLimit(t *testing.T) {
+	s, h, c := setup(t)
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	for i, v := range []struct{ name, version, platform string }{
+		{"hello", "1.0.0", "linux-x64"}, {"hello", "1.0.0", "win32-x64"}, {"hello", "1.1.0", ""}, {"hello", "1.2.0", ""}, {"hello", "2.0.0", ""},
+		{"other", "1.0.0", ""}, {"other", "2.0.0", ""}, {"other", "3.0.0", ""},
+	} {
+		if code, _ := upload(t, h, testutil.VSIX(v.name, v.version, v.platform, false, nil), fmt.Sprint(i)); code != 201 {
+			t.Fatal(code)
+		}
+	}
+	put := func(path, body string) (int, map[string]any) {
+		t.Helper()
+		r := request(t, h, "PUT", path, []byte(body), auth)
+		defer r.Body.Close()
+		var out map[string]any
+		json.NewDecoder(r.Body).Decode(&out)
+		return r.StatusCode, out
+	}
+	for path, body := range map[string]string{"/api/v2/limit": `{"keep":null}`, "/api/v2/catalog/test.hello/limit": `{"keep":-1}`} {
+		if code, _ := put(path, body); code != 400 {
+			t.Fatalf("%s %s accepted: %d", path, body, code)
+		}
+	}
+	code, preview := put("/api/v2/limit", `{"keep":2,"dryRun":true}`)
+	if p := preview["trimmed"].(map[string]any); code != 200 || p["extensions"] != float64(2) || p["versions"] != float64(3) || p["packages"] != float64(4) {
+		t.Fatalf("library preview: %d %v", code, preview)
+	}
+	if statusOf(t, s, "test.hello@1.0.0@linux-x64") != "stored" {
+		t.Fatal("a preview deleted a version")
+	}
+	if code, _ := put("/api/v2/catalog/test.other/limit", `{"keep":0}`); code != 200 {
+		t.Fatalf("keep-all override: %d", code)
+	}
+	if code, done := put("/api/v2/limit", `{"keep":2}`); code != 200 || done["trimmed"].(map[string]any)["packages"] != float64(3) {
+		t.Fatalf("apply library limit: %d %v", code, done)
+	}
+	for key, want := range map[string]string{"test.hello@1.0.0@linux-x64": "deleted", "test.hello@1.1.0@universal": "deleted", "test.hello@1.2.0@universal": "stored", "test.hello@2.0.0@universal": "stored", "test.other@1.0.0@universal": "stored"} {
+		if got := statusOf(t, s, key); got != want {
+			t.Fatalf("%s: %s, want %s", key, got, want)
+		}
+	}
+	if p, _ := s.db.Get("test.hello@1.1.0@universal"); p.DeletedBy != "limit" {
+		t.Fatalf("deleted by: %q", p.DeletedBy)
+	}
+	if _, e := os.Stat(filepath.Join(c.Extensions, "test.hello-1.1.0-universal.vsix")); !os.IsNotExist(e) {
+		t.Fatal("a version beyond the limit is still on disk")
+	}
+	if code, v := upload(t, h, testutil.VSIX("hello", "1.1.5", "", false, nil), "older"); code != 409 || v["code"] != "retention" {
+		t.Fatalf("upload older than the limit: %d %v", code, v)
+	}
+	r := request(t, h, "POST", "/api/v2/extensions?restore=true", testutil.VSIX("hello", "1.1.0", "", false, nil), auth)
+	r.Body.Close()
+	if r.StatusCode != 409 {
+		t.Fatalf("restoring a version beyond the limit: %d", r.StatusCode)
+	}
+	if code, _ := upload(t, h, testutil.VSIX("hello", "2.1.0", "", false, nil), "newer"); code != 201 || statusOf(t, s, "test.hello@1.2.0@universal") != "deleted" {
+		t.Fatalf("a newer upload should push the oldest kept version out: %d", code)
+	}
+	r = request(t, h, "POST", "/api/v2/extensions/check", []byte(`{"keys":["test.hello@2.1.0@universal","test.other@1.0.0@universal"]}`), auth)
+	var check struct {
+		Limits map[string]int `json:"limits"`
+	}
+	json.NewDecoder(r.Body).Decode(&check)
+	r.Body.Close()
+	if check.Limits["test.hello"] != 2 || check.Limits["test.other"] != 0 {
+		t.Fatalf("check limits: %v", check.Limits)
+	}
+	_, entry := getJSON(t, h, "/api/v2/catalog/test.other", auth)
+	if x := entry["extension"].(map[string]any); x["keep"] != float64(0) || x["keepSource"] != "extension" {
+		t.Fatalf("override in catalog: %v", x)
+	}
+	if code, done := put("/api/v2/catalog/test.other/limit", `{"keep":null}`); code != 200 || done["keepSource"] != "library" || done["trimmed"].(map[string]any)["packages"] != float64(1) {
+		t.Fatalf("follow the library default again: %d %v", code, done)
+	}
+	_, limits := getJSON(t, h, "/api/v2/limit", auth)
+	if limits["keep"] != float64(2) || len(limits["extensionLimits"].(map[string]any)) != 0 {
+		t.Fatalf("limits: %v", limits)
+	}
+	// A file dropped into the folder by hand is inventoried, then trimmed to the limit.
+	if e := os.WriteFile(filepath.Join(c.Extensions, "manual.vsix"), testutil.VSIX("hello", "0.9.0", "", false, nil), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.Reconcile(false, nil); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(filepath.Join(c.Extensions, "manual.vsix")); !os.IsNotExist(e) || statusOf(t, s, "test.hello@0.9.0@universal") != "deleted" {
+		t.Fatal("a scan should trim versions beyond the limit")
+	}
+	_, status := getJSON(t, h, "/api/v2/status", auth)
+	if status["limit"].(map[string]any)["keep"] != float64(2) || status["apiVersion"] != float64(2) {
+		t.Fatalf("status: %v", status)
+	}
+}
+
+func TestAPIv1IsRetired(t *testing.T) {
+	_, h, _ := setup(t)
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	if code, body := getJSON(t, h, "/api/v1/status", auth); code != 200 || body["apiVersion"] != float64(2) {
+		t.Fatalf("v1 status should tell old clients about version 2: %d %v", code, body)
+	}
+	for _, method := range []string{"GET", "POST"} {
+		r := request(t, h, method, "/api/v1/extensions", nil, auth)
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		r.Body.Close()
+		if r.StatusCode != 410 || body["code"] != "api_version" {
+			t.Fatalf("%s v1: %d %v", method, r.StatusCode, body)
+		}
 	}
 }

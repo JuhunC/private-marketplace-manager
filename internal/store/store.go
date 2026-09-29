@@ -37,7 +37,9 @@ func Open(dir string) (*Store, error) {
  CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mtime INTEGER NOT NULL, key TEXT NOT NULL, sha TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS files_key ON files(key);
  CREATE TABLE IF NOT EXISTS dirty (key TEXT PRIMARY KEY);
- CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);`)
+ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+ -- limits holds per-extension version limits (0 keeps every version); meta 'keep' holds the library default.
+ CREATE TABLE IF NOT EXISTS limits (id TEXT PRIMARY KEY, keep INTEGER NOT NULL);`)
 	if e != nil {
 		db.Close()
 		return nil, e
@@ -114,12 +116,13 @@ func (s *Store) InTx(f func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
-// MarkDeleted records that an administrator deleted these packages' files, keeping them in the index,
-// and queues them so the next scan removes any file left behind if the process stops mid-deletion.
-func (s *Store) MarkDeleted(packages []vsix.Package, at, detail string) error {
+// MarkDeleted records that these packages' files are being deleted by an operator or the version limit,
+// keeping them in the index, and queues them so the next scan removes any file left behind if the
+// process stops mid-deletion.
+func (s *Store) MarkDeleted(packages []vsix.Package, at, by, detail string) error {
 	return s.InTx(func(tx *sql.Tx) error {
 		for _, p := range packages {
-			p.Status, p.DeletedAt = "deleted", at
+			p.Status, p.DeletedAt, p.DeletedBy = "deleted", at, by
 			if e := Put(tx, p); e != nil {
 				return e
 			}
@@ -127,8 +130,95 @@ func (s *Store) MarkDeleted(packages []vsix.Package, at, detail string) error {
 				return e
 			}
 		}
-		return AuditIn(tx, "operator", "deleted_versions", detail)
+		return AuditIn(tx, by, "deleted_versions", detail)
 	})
+}
+
+// KeepDefault is the library's version limit; 0 keeps every version.
+func (s *Store) KeepDefault() (int, error) {
+	var keep int
+	e := s.DB.QueryRow(`SELECT coalesce((SELECT CAST(v AS INTEGER) FROM meta WHERE k='keep'),0)`).Scan(&keep)
+	return keep, e
+}
+func (s *Store) SetKeepDefault(keep int) error {
+	_, e := s.DB.Exec(`INSERT INTO meta VALUES('keep',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, fmt.Sprint(keep))
+	return e
+}
+
+// Keep reports an extension's version limit and whether it is the extension's own or the library default.
+func (s *Store) Keep(id string) (keep int, own bool, e error) {
+	e = s.DB.QueryRow(`SELECT keep FROM limits WHERE id=?`, id).Scan(&keep)
+	if e == nil {
+		return keep, true, nil
+	}
+	if e != sql.ErrNoRows {
+		return 0, false, e
+	}
+	keep, e = s.KeepDefault()
+	return keep, false, e
+}
+
+// SetKeep gives an extension its own version limit, or with nil makes it follow the library default.
+func (s *Store) SetKeep(id string, keep *int) error {
+	if keep == nil {
+		_, e := s.DB.Exec(`DELETE FROM limits WHERE id=?`, id)
+		return e
+	}
+	_, e := s.DB.Exec(`INSERT INTO limits VALUES(?,?) ON CONFLICT(id) DO UPDATE SET keep=excluded.keep`, id, *keep)
+	return e
+}
+
+// Overrides lists the extensions with their own version limit.
+func (s *Store) Overrides() (map[string]int, error) {
+	rows, e := s.DB.Query(`SELECT id, keep FROM limits`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var keep int
+		if e = rows.Scan(&id, &keep); e != nil {
+			return nil, e
+		}
+		out[id] = keep
+	}
+	return out, rows.Err()
+}
+
+// Extensions streams every extension's packages, one extension at a time in ID order.
+func (s *Store) Extensions(f func(id string, packages []vsix.Package) error) error {
+	after := ""
+	for {
+		var ids []string
+		rows, e := s.DB.Query(`SELECT DISTINCT id FROM packages WHERE id>? ORDER BY id LIMIT 1000`, after)
+		if e != nil {
+			return e
+		}
+		for rows.Next() {
+			var id string
+			if e = rows.Scan(&id); e != nil {
+				rows.Close()
+				return e
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if e = rows.Err(); e != nil || len(ids) == 0 {
+			return e
+		}
+		for _, id := range ids {
+			packages, _, e := s.List(id, 2147483647, 0)
+			if e == nil {
+				e = f(id, packages)
+			}
+			if e != nil {
+				return e
+			}
+		}
+		after = ids[len(ids)-1]
+	}
 }
 
 // FilesHolding lists the VSIX files remembered for these package keys.
@@ -261,6 +351,8 @@ type Extension struct {
 	Bytes         int64          `json:"bytes"`
 	UpdatedAt     string         `json:"updatedAt,omitempty"`
 	StatusCounts  map[string]int `json:"statusCounts"`
+	Keep          int            `json:"keep"`       // newest versions kept; 0 keeps all
+	KeepSource    string         `json:"keepSource"` // "library" default or the "extension"'s own
 }
 
 // CatalogQuery selects extension summaries. ID matches exactly; Search matches part of an ID or display name.
@@ -330,6 +422,30 @@ func (s *Store) Catalog(q CatalogQuery) ([]Extension, int, error) {
 	ids := make([]any, 0, len(out))
 	for _, x := range out {
 		ids = append(ids, x.ID)
+	}
+	library, e := s.KeepDefault()
+	if e != nil {
+		return nil, 0, e
+	}
+	for i := range out {
+		out[i].Keep, out[i].KeepSource = library, "library"
+	}
+	limits, e := s.DB.Query(`SELECT id, keep FROM limits WHERE id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, ids...)
+	if e != nil {
+		return nil, 0, e
+	}
+	for limits.Next() {
+		var id string
+		var keep int
+		if e = limits.Scan(&id, &keep); e != nil {
+			limits.Close()
+			return nil, 0, e
+		}
+		out[index[id]].Keep, out[index[id]].KeepSource = keep, "extension"
+	}
+	limits.Close()
+	if e = limits.Err(); e != nil {
+		return nil, 0, e
 	}
 	rows, e = s.DB.Query(`SELECT id, version, status, coalesce(json_extract(payload,'$.displayName'),'') FROM packages WHERE id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, ids...)
 	if e != nil {

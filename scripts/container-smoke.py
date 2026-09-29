@@ -25,16 +25,16 @@ try:
     with zipfile.ZipFile(b,'w',zipfile.ZIP_DEFLATED) as z:
         z.writestr('extension/package.json',json.dumps({'publisher':'smoke','name':'hello','version':'1.0.0','engines':{'vscode':'^1.0.0'}}))
         z.writestr('extension.vsixmanifest','<PackageManifest><Metadata><Identity Publisher="smoke" Id="hello" Version="1.0.0"/></Metadata></PackageManifest>')
-    status,result=request('/api/v1/extensions',b.getvalue())
+    status,result=request('/api/v2/extensions',b.getvalue())
     assert status==201 and result['package']['status']=='stored',result
-    status,result=request('/api/v1/extensions',b.getvalue())
+    status,result=request('/api/v2/extensions',b.getvalue())
     assert status==200 and result['duplicate'],result
-    status,result=request('/api/v1/admin/reconcile',b'{}')
+    status,result=request('/api/v2/admin/reconcile',b'{}')
     assert status==200 and result['ok'] and result['statusCounts']['stored']==1,result
     docker('restart','--time','5',name)
     port=docker('port',name,'8080/tcp').rsplit(':',1)[1]
     ready()
-    status,result=request('/api/v1/extensions')
+    status,result=request('/api/v2/extensions')
     assert result['total']==1 and result['packages'][0]['status']=='stored',result
     print('Container smoke passed: non-root startup, durable upload, duplicate retry, restart reconciliation.')
 finally:

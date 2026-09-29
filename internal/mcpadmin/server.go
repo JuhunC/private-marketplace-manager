@@ -93,7 +93,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 		Description: "Check liveness, writable storage/database readiness, API compatibility, package count, bytes, and upload limit.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
 		out := map[string]any{}
-		for name, path := range map[string]string{"liveness": "/health/live", "readiness": "/health/ready", "status": "/api/v1/status"} {
+		for name, path := range map[string]string{"liveness": "/health/live", "readiness": "/health/ready", "status": "/api/v2/status"} {
 			var value map[string]any
 			if e := api.JSON(ctx, http.MethodGet, path, nil, &value); e != nil {
 				return nil, nil, fmt.Errorf("%s check failed: %w", name, e)
@@ -121,7 +121,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 			q.Set("id", strings.ToLower(in.ID))
 		}
 		var out map[string]any
-		if e := api.JSON(ctx, http.MethodGet, "/api/v1/extensions?"+q.Encode(), nil, &out); e != nil {
+		if e := api.JSON(ctx, http.MethodGet, "/api/v2/extensions?"+q.Encode(), nil, &out); e != nil {
 			return nil, nil, e
 		}
 		return nil, out, nil
@@ -135,7 +135,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 			return nil, nil, fmt.Errorf("provide one to 1000 package keys")
 		}
 		var out map[string]any
-		if e := api.JSON(ctx, http.MethodPost, "/api/v1/extensions/check", map[string]any{"keys": in.Keys}, &out); e != nil {
+		if e := api.JSON(ctx, http.MethodPost, "/api/v2/extensions/check", map[string]any{"keys": in.Keys}, &out); e != nil {
 			return nil, nil, e
 		}
 		return nil, out, nil
@@ -146,7 +146,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 		Description: "Return the latest 100 manager audit events, including rejected uploads, conflicts, reconciliation, and stored packages.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
 		var out []map[string]any
-		if e := api.JSON(ctx, http.MethodGet, "/api/v1/audit-events", nil, &out); e != nil {
+		if e := api.JSON(ctx, http.MethodGet, "/api/v2/audit-events", nil, &out); e != nil {
 			return nil, nil, e
 		}
 		return nil, out, nil
@@ -157,7 +157,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 		Description: "Return the latest 100 client-reported synchronization runs and their per-package failures.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
 		var out []map[string]any
-		if e := api.JSON(ctx, http.MethodGet, "/api/v1/sync-runs", nil, &out); e != nil {
+		if e := api.JSON(ctx, http.MethodGet, "/api/v2/sync-runs", nil, &out); e != nil {
 			return nil, nil, e
 		}
 		return nil, out, nil
@@ -174,7 +174,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 		Name: "manager_reconcile_storage", Title: "Reconcile storage inventory", Annotations: additive("Reconcile storage inventory"),
 		Description: "Rescan the designated VSIX directory, inventory valid external files, recover pending publications, and mark absent records missing. Files whose size and modification time are unchanged are trusted; set fullVerify to rehash every file. It never resolves different-byte conflicts, and only removes leftover files of versions an operator already deleted.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ReconcileInput) (*mcp.CallToolResult, any, error) {
-		path := "/api/v1/admin/reconcile"
+		path := "/api/v2/admin/reconcile"
 		if in.FullVerify {
 			path += "?verify=full"
 		}
@@ -220,7 +220,7 @@ func analyze(ctx context.Context, api *adminapi.Client) Analysis {
 		out.Healthy = false
 		addFinding(Finding{Severity: "critical", Code: "manager_not_ready", Summary: "Manager readiness check failed", Evidence: e.Error(), SuggestedAction: "Check container logs, database access, extension-directory permissions, and free space."})
 	}
-	if e := api.JSON(ctx, http.MethodGet, "/api/v1/status", nil, &out.Status); e != nil {
+	if e := api.JSON(ctx, http.MethodGet, "/api/v2/status", nil, &out.Status); e != nil {
 		out.Healthy = false
 		addFinding(Finding{Severity: "critical", Code: "status_unavailable", Summary: "Authenticated manager status is unavailable", Evidence: e.Error(), SuggestedAction: "Check the server URL, TLS trust, API token, and manager logs."})
 		return out
@@ -252,7 +252,7 @@ func analyze(ctx context.Context, api *adminapi.Client) Analysis {
 			Packages []vsix.Package `json:"packages"`
 			Total    int            `json:"total"`
 		}
-		path := fmt.Sprintf("/api/v1/extensions?limit=500&offset=%d", offset)
+		path := fmt.Sprintf("/api/v2/extensions?limit=500&offset=%d", offset)
 		if e := api.JSON(ctx, http.MethodGet, path, nil, &page); e != nil {
 			out.Healthy = false
 			addFinding(Finding{Severity: "critical", Code: "inventory_unavailable", Summary: "Inventory could not be read", Evidence: e.Error()})
@@ -285,7 +285,7 @@ func analyze(ctx context.Context, api *adminapi.Client) Analysis {
 		Status string `json:"status"`
 		Failed int    `json:"failed"`
 	}
-	if e := api.JSON(ctx, http.MethodGet, "/api/v1/sync-runs", nil, &runs); e == nil {
+	if e := api.JSON(ctx, http.MethodGet, "/api/v2/sync-runs", nil, &runs); e == nil {
 		out.RecentSyncRuns = len(runs)
 		for _, run := range runs {
 			if run.Failed > 0 || run.Status == "partial" {

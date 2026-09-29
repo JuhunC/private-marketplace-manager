@@ -11,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,20 +110,21 @@ type Failure struct {
 	Error   string `json:"error"`
 }
 type Report struct {
-	ID         string     `json:"id"`
-	Started    string     `json:"started"`
-	Finished   string     `json:"finished,omitempty"`
-	Version    string     `json:"version"`
-	ListHash   string     `json:"listHash"`
-	Extensions []string   `json:"extensions"`
-	Discovered int        `json:"discovered"`
-	Stored     int        `json:"stored"`
-	Skipped    int        `json:"skipped"`
-	Deleted    int        `json:"deleted"` // versions an administrator deleted; not collected again
-	Failed     int        `json:"failed"`
-	Status     string     `json:"status"`
-	Errors     []Failure  `json:"errors"`
-	Artifacts  []Artifact `json:"artifacts,omitempty"`
+	ID          string     `json:"id"`
+	Started     string     `json:"started"`
+	Finished    string     `json:"finished,omitempty"`
+	Version     string     `json:"version"`
+	ListHash    string     `json:"listHash"`
+	Extensions  []string   `json:"extensions"`
+	Discovered  int        `json:"discovered"`
+	Stored      int        `json:"stored"`
+	Skipped     int        `json:"skipped"`
+	Deleted     int        `json:"deleted"`     // versions an administrator deleted; not collected again
+	BeyondLimit int        `json:"beyondLimit"` // packages older than the extension's version limit; not downloaded
+	Failed      int        `json:"failed"`
+	Status      string     `json:"status"`
+	Errors      []Failure  `json:"errors"`
+	Artifacts   []Artifact `json:"artifacts,omitempty"`
 }
 type Runner struct {
 	Config  Config
@@ -241,67 +244,81 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 			report.Artifacts = append(report.Artifacts, artifacts...)
 			continue
 		}
-		for start := 0; start < len(artifacts); start += 500 {
-			end := min(start+500, len(artifacts))
-			batch := artifacts[start:end]
+		// Ask the manager about every package first: which are stored, which an operator deleted, and how
+		// many of the newest versions this extension keeps, so only packages that will be kept are downloaded.
+		stored := map[string]vsix.Package{}
+		deleted := map[string]bool{}
+		keep := 0
+		for start := 0; start < len(artifacts) && err == nil; start += 500 {
 			keys := []string{}
-			for _, a := range batch {
+			for _, a := range artifacts[start:min(start+500, len(artifacts))] {
 				keys = append(keys, a.Key())
 			}
 			var check struct {
 				Packages map[string]vsix.Package `json:"packages"`
 				Deleted  []string                `json:"deleted"`
+				Limits   map[string]int          `json:"limits"`
 			}
-			if err = r.apiJSON(ctx, "POST", "/api/v1/extensions/check", map[string]any{"keys": keys}, &check); err != nil {
-				report.Failed += len(batch)
-				report.Errors = append(report.Errors, Failure{id, err.Error()})
-				continue
+			if err = r.apiJSON(ctx, "POST", "/api/v2/extensions/check", map[string]any{"keys": keys}, &check); err == nil {
+				maps.Copy(stored, check.Packages)
+				for _, k := range check.Deleted {
+					deleted[k] = true
+				}
+				keep = check.Limits[id]
 			}
-			deleted := map[string]bool{}
-			for _, k := range check.Deleted {
-				deleted[k] = true
-			}
-			jobs := make(chan Artifact)
-			var wg sync.WaitGroup
-			var mu sync.Mutex
-			for i := 0; i < r.Config.Concurrency; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for a := range jobs {
-						if p, ok := check.Packages[a.Key()]; ok && p.Status == "stored" && p.Prerelease == a.Prerelease {
-							mu.Lock()
-							report.Skipped++
-							mu.Unlock()
-							continue
-						}
-						if deleted[a.Key()] {
-							mu.Lock()
-							report.Deleted++
-							mu.Unlock()
-							continue
-						}
-						err := r.transfer(ctx, a)
-						mu.Lock()
-						if err != nil {
-							report.Failed++
-							if len(report.Errors) < 200 {
-								report.Errors = append(report.Errors, Failure{a.Key(), err.Error()})
-							}
-						} else {
-							report.Stored++
-							fmt.Fprintf(r.Log, "Stored %s\n", a.Key())
-						}
-						mu.Unlock()
-					}
-				}()
-			}
-			for _, a := range batch {
-				jobs <- a
-			}
-			close(jobs)
-			wg.Wait()
 		}
+		if err != nil {
+			report.Failed += len(artifacts)
+			report.Errors = append(report.Errors, Failure{id, err.Error()})
+			continue
+		}
+		wanted := newest(artifacts, deleted, keep)
+		var queue []Artifact
+		for _, a := range artifacts {
+			switch p, ok := stored[a.Key()]; {
+			case ok && p.Status == "stored" && p.Prerelease == a.Prerelease:
+				report.Skipped++
+			case deleted[a.Key()]:
+				report.Deleted++
+			case !wanted[a.Version]:
+				report.BeyondLimit++
+			default:
+				queue = append(queue, a)
+			}
+		}
+		jobs := make(chan Artifact)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		for i := 0; i < r.Config.Concurrency; i++ {
+			wg.Go(func() {
+				for a := range jobs {
+					err := r.transfer(ctx, a)
+					var se statusError
+					refused := errors.As(err, &se)
+					mu.Lock()
+					switch {
+					case err == nil:
+						report.Stored++
+						fmt.Fprintf(r.Log, "Stored %s\n", a.Key())
+					case refused && se.apiCode == "retention": // the limit changed during the run
+						report.BeyondLimit++
+					case refused && se.apiCode == "deleted":
+						report.Deleted++
+					default:
+						report.Failed++
+						if len(report.Errors) < 200 {
+							report.Errors = append(report.Errors, Failure{a.Key(), err.Error()})
+						}
+					}
+					mu.Unlock()
+				}
+			})
+		}
+		for _, a := range queue {
+			jobs <- a
+		}
+		close(jobs)
+		wg.Wait()
 	}
 	report.Finished = time.Now().UTC().Format(time.RFC3339)
 	report.Status = "complete"
@@ -324,7 +341,7 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 		return report, err
 	}
 	if !discover {
-		if err = r.apiJSON(ctx, "POST", "/api/v1/sync-runs", report, nil); err != nil {
+		if err = r.apiJSON(ctx, "POST", "/api/v2/sync-runs", report, nil); err != nil {
 			return report, fmt.Errorf("files processed but run report could not be saved: %w", err)
 		}
 	}
@@ -332,6 +349,26 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 		return report, fmt.Errorf("%d items failed; see report-%s.json", report.Failed, report.ID)
 	}
 	return report, nil
+}
+
+// newest picks the versions a limit keeps: the keep newest versions with a package not deleted by an
+// operator. keep 0 keeps every version.
+func newest(artifacts []Artifact, deleted map[string]bool, keep int) map[string]bool {
+	var versions []string
+	for _, a := range artifacts {
+		if !deleted[a.Key()] && !slices.Contains(versions, a.Version) {
+			versions = append(versions, a.Version)
+		}
+	}
+	slices.SortFunc(versions, func(a, b string) int { return vsix.CompareVersions(b, a) })
+	if keep > 0 && len(versions) > keep {
+		versions = versions[:keep]
+	}
+	wanted := map[string]bool{}
+	for _, v := range versions {
+		wanted[v] = true
+	}
+	return wanted
 }
 
 // scanPoll is how often a sync rechecks a manager that is still scanning its inventory after a restart.
@@ -350,11 +387,15 @@ func (r *Runner) awaitManager(ctx context.Context) error {
 				Error   string `json:"error"`
 			} `json:"inventory"`
 		}
-		if e := r.apiJSON(ctx, "GET", "/api/v1/status", nil, &status); e != nil {
+		if e := r.apiJSON(ctx, "GET", "/api/v2/status", nil, &status); e != nil {
+			var se statusError
+			if errors.As(e, &se) && se.code == http.StatusNotFound {
+				return fmt.Errorf("the manager does not serve API v2; upgrade it to v0.8.0 or later before this client")
+			}
 			return e
 		}
-		if status.APIVersion != 1 {
-			return fmt.Errorf("unsupported manager API version %d", status.APIVersion)
+		if status.APIVersion != 2 {
+			return fmt.Errorf("unsupported manager API version %d; this client needs API version 2", status.APIVersion)
 		}
 		switch status.Inventory.State {
 		case "scanning":
@@ -431,7 +472,7 @@ func (r *Runner) transfer(ctx context.Context, a Artifact) error {
 		}
 		defer file.Close()
 		q := url.Values{"id": {p.ID}, "version": {p.Version}, "platform": {p.Platform}}
-		req, e := http.NewRequestWithContext(ctx, "POST", r.Config.ServerURL+"/api/v1/extensions?"+q.Encode(), file)
+		req, e := http.NewRequestWithContext(ctx, "POST", r.Config.ServerURL+"/api/v2/extensions?"+q.Encode(), file)
 		if e != nil {
 			return 0, e
 		}
@@ -463,6 +504,16 @@ func (r *Runner) transfer(ctx context.Context, a Artifact) error {
 }
 
 type retryable struct{ error }
+
+// statusError is a manager or marketplace HTTP failure; its status and the manager's error code survive
+// retries for callers to inspect.
+type statusError struct {
+	code    int
+	message string
+	apiCode string
+}
+
+func (e statusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.code, e.message) }
 
 func retry(ctx context.Context, attempts int, fn func() (time.Duration, error)) error {
 	if attempts < 1 {
@@ -506,6 +557,7 @@ func retry(ctx context.Context, attempts int, fn func() (time.Duration, error)) 
 func responseError(resp *http.Response) (time.Duration, error) {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	var msg struct {
+		Code  string `json:"code"`
 		Error string `json:"error"`
 	}
 	_ = json.Unmarshal(b, &msg)
@@ -513,7 +565,7 @@ func responseError(resp *http.Response) (time.Duration, error) {
 	if msg.Error != "" {
 		message = msg.Error
 	}
-	e := fmt.Errorf("HTTP %d: %s", resp.StatusCode, message)
+	e := statusError{resp.StatusCode, message, msg.Code}
 	if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 		delay := time.Duration(0)
 		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil {

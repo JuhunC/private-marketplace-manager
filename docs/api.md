@@ -1,6 +1,16 @@
-# REST API v1
+# REST API v2
 
-Base URL: `https://<internal-manager>/api/v1`. The [OpenAPI specification](../internal/server/web/openapi.json) is also served at `/openapi.json`. Tokens are supplied via the `Authorization: Bearer ...` header. Browser operator sessions use an HTTP-only cookie and CSRF token; API clients should use bearer authentication.
+Base URL: `https://<internal-manager>/api/v2`. The [OpenAPI specification](../internal/server/web/openapi.json) is also served at `/openapi.json`. Tokens are supplied via the `Authorization: Bearer ...` header. Browser operator sessions use an HTTP-only cookie and CSRF token; API clients should use bearer authentication.
+
+## Changes from API v1
+
+API v2 arrived with manager v0.8.0 and its version limits:
+
+- Every endpoint moved from `/api/v1` to `/api/v2`; `GET /status` reports `"apiVersion": 2`.
+- Uploads of a version older than the extension's newest kept versions are refused with 409 `retention`, and an upload that adds a newer version deletes the oldest beyond the limit.
+- `POST /extensions/check` also returns `limits` (each requested extension's limit) and `deleted`, so clients download only versions that will be kept.
+- New endpoints `GET /limit`, `PUT /limit`, and `PUT /catalog/{id}/limit` read and set limits; catalog entries report `keep` and `keepSource`; deleted packages report `deletedBy`.
+- `GET /api/v1/status` still answers, with `"apiVersion": 2`, so older clients stop with an "unsupported manager API version" message. Every other `/api/v1` path returns 410 `api_version`. Upgrade the manager first, then `marketplace-sync` and `marketplace-mcp` v0.8.0 or later.
 
 ## Upload one VSIX
 
@@ -17,7 +27,7 @@ header = "Authorization: Bearer <provisioned token>"
 curl --fail-with-body --config protected-auth.curl \
   -H 'Content-Type: application/octet-stream' \
   --data-binary @extension.vsix \
-  'https://manager.example.internal/api/v1/extensions'
+  'https://manager.example.internal/api/v2/extensions'
 ```
 
 Successful response:
@@ -46,8 +56,11 @@ Successful response:
 
 | Method and path | Purpose |
 |---|---|
-| `GET /status` | API version; stored `extensions`, `versions`, `packages`, and `bytes`; `attention` (records not stored); upload limit; startup scan progress (`inventory`); disk space (`storage`) |
-| `GET /catalog?q=python&sort=versions&attention=true&limit=100&offset=0` | One entry per extension: latest version, version/platform/package counts, stored bytes, last update, and status counts. `q` matches part of an ID or display name; `sort` is `name`, `versions`, `size`, or `updated`; `attention=true` keeps extensions with missing, pending, or conflicting records |
+| `GET /status` | API version; stored `extensions`, `versions`, `packages`, and `bytes`; `attention` (records not stored); upload limit; startup scan progress (`inventory`); disk space (`storage`); the library's version limit (`limit`) |
+| `GET /limit` | The library's version limit `keep` (0 keeps every version) and `extensionLimits`, the extensions with their own |
+| `PUT /limit` | Set the library limit: `{"keep":5}`; add `"dryRun":true` for a preview. Extensions following it are trimmed to their newest 5 versions |
+| `PUT /catalog/{id}/limit` | Set one extension's limit: `{"keep":3}`, `{"keep":0}` to keep every version, or `{"keep":null}` to follow the library default; `"dryRun":true` previews |
+| `GET /catalog?q=python&sort=versions&attention=true&limit=100&offset=0` | One entry per extension: latest version, version/platform/package counts, stored bytes, last update, status counts, and its version limit (`keep`, `keepSource` of `library` or `extension`). `q` matches part of an ID or display name; `sort` is `name`, `versions`, `size`, or `updated`; `attention=true` keeps extensions with missing, pending, or conflicting records |
 | `POST /catalog/{id}/delete` | Delete versions from disk: `{"through":"1.5.1"}` removes the earliest version through 1.5.1 (semantic order, inclusive) and `{"all":true}` every version. Add `"dryRun":true` for a preview. The response lists `versions`, `packages`, freed `bytes`, and `filesRemaining` |
 | `GET /catalog/{id}` | One extension's summary plus its versions, newest first by semantic version, each with its platform packages |
 | `GET /extensions?limit=100&offset=0&id=publisher.extension` | Inventory, exact ID filter, max page size 500 |
@@ -69,13 +82,24 @@ Batch lookup example:
 {"keys":["publisher.extension@1.2.3@universal","publisher.extension@1.2.3@linux-arm64"]}
 ```
 
-Response: `{"packages":{"<key>":{...package metadata...}}}`. Absent, missing, or conflicting packages are not returned. Lightweight lookup checks presence/type/size, not the entire file hash. Restart reconciliation rehashes new or changed files; `POST /admin/reconcile?verify=full` rehashes every file. Avoid out-of-band changes.
+Response: `{"packages":{"<key>":{...package metadata...}},"deleted":["<key>"],"limits":{"publisher.extension":5}}`. Absent, missing, or conflicting packages are not in `packages`; `limits` gives each requested extension's version limit (0 keeps every version). Lightweight lookup checks presence/type/size, not the entire file hash. Restart reconciliation rehashes new or changed files; `POST /admin/reconcile?verify=full` rehashes every file. Avoid out-of-band changes.
 
-Health endpoints `/health/live` and `/health/ready` are outside `/api/v1` and require no credentials. No endpoint accepts an arbitrary destination path, downloads arbitrary remote URLs, or executes commands. Only `POST /catalog/{id}/delete` removes VSIX files.
+Health endpoints `/health/live` and `/health/ready` are outside `/api/v2` and require no credentials. No endpoint accepts an arbitrary destination path, downloads arbitrary remote URLs, or executes commands. Only `POST /catalog/{id}/delete`, the version-limit endpoints, and an upload that pushes an older version past the limit remove VSIX files.
+
+### Version limits
+
+A version limit keeps an extension's newest N versions, ordered by version number with stable and prerelease versions counted together; each version includes all its platform packages. The library limit applies to every extension without its own. 0 keeps every version, which is the default.
+
+Setting or lowering a limit deletes the older versions at once (preview with `dryRun`). Deletions work as below, with `deletedBy` set to `limit` instead of `operator`. Afterwards:
+
+- An upload of a version older than the newest N kept versions returns 409 `retention`, including `restore=true` uploads. Raise the limit to bring such versions back.
+- An upload of a newer version is stored, then the oldest version beyond the limit is deleted.
+- A startup or reconcile scan that inventories new files trims their extensions to the limit.
+- marketplace-sync reads `limits` from `POST /extensions/check` and downloads only the newest N versions, counting the rest as `beyondLimit` in its report.
 
 ### Deleted versions
 
-Deleting versions removes their files from the extension folder but keeps their records with status `deleted` and a `deletedAt` time, so the webpage and API still list them. They are not counted as versions, packages, platforms, or needing attention; `GET /status` reports them as `deleted` and `deletedBytes`. `POST /extensions/check` returns requested keys that were deleted in `deleted`, and marketplace-sync skips them without downloading. Uploading a deleted version returns 409 `deleted` unless the request adds `restore=true`, which the webpage and `marketplace-mcp` upload do to bring a version back. If the manager stops before a deletion's files are gone, the next scan removes files holding exactly the deleted bytes. The action is recorded in the audit log as `deleted_versions`.
+Deleting versions removes their files from the extension folder but keeps their records with status `deleted`, a `deletedAt` time, and `deletedBy` (`operator` or `limit`), so the webpage and API still list them. They are not counted as versions, packages, platforms, or needing attention; `GET /status` reports them as `deleted` and `deletedBytes`. `POST /extensions/check` returns requested keys that were deleted in `deleted`, and marketplace-sync skips them without downloading. Uploading a deleted version returns 409 `deleted` unless the request adds `restore=true`, which the webpage and `marketplace-mcp` upload do to bring a version back. If the manager stops before a deletion's files are gone, the next scan removes files holding exactly the deleted bytes. The action is recorded in the audit log as `deleted_versions`.
 
 `POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never chooses between conflicting bytes, and the only VSIX files it deletes are leftovers of versions an operator already deleted. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records, counts by status, and `fullVerify`. Routine scans (startup and reconcile without `verify=full`) remember each file's size and modification time and rehash only new or changed files; `verify=full` rehashes every file, which takes time proportional to the archive's size.
 
@@ -100,7 +124,8 @@ Errors contain `code`, `error`, and `requestId`:
 | 400 | Invalid request/identifier/key | Fix input |
 | 401/403 | Authentication or browser origin/CSRF failure | Fix credential/origin; do not retry blindly |
 | 404 | Package/receipt unavailable | Reconcile or retry the original upload |
-| 409 | Different bytes at same identity, reused key, publication conflict, or `deleted` version | Investigate; never overwrite automatically. Add `restore=true` to bring back a deleted version |
+| 409 | Different bytes at same identity, reused key, publication conflict, `deleted` version, or `retention` (older than the version limit) | Investigate; never overwrite automatically. Add `restore=true` to bring back a deleted version; raise the limit for an older one |
+| 410 `api_version` | An API v1 path | Update the client to API v2 |
 | 413 | Upload/body exceeds limit | Review size limits |
 | 422 | Invalid ZIP/manifests, identity, or checksum | Inspect original package |
 | 429 | Upload/login concurrency limit | Honor Retry-After |

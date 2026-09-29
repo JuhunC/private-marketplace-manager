@@ -124,12 +124,12 @@ func TestAnalyzeReportsStartupScan(t *testing.T) {
 				return
 			}
 			io.WriteString(w, `{"status":"starting"}`)
-		case "/api/v1/status":
+		case "/api/v2/status":
 			if failed.Load() {
-				io.WriteString(w, `{"apiVersion":1,"inventory":{"state":"failed","scanned":3,"total":10,"error":"open /data/extensions: permission denied"}}`)
+				io.WriteString(w, `{"apiVersion":2,"inventory":{"state":"failed","scanned":3,"total":10,"error":"open /data/extensions: permission denied"}}`)
 				return
 			}
-			io.WriteString(w, `{"apiVersion":1,"inventory":{"state":"scanning","scanned":3,"total":10}}`)
+			io.WriteString(w, `{"apiVersion":2,"inventory":{"state":"scanning","scanned":3,"total":10}}`)
 		default:
 			t.Errorf("analysis requested %s during the startup scan", r.URL.Path)
 			w.WriteHeader(503)
@@ -160,11 +160,11 @@ func TestAnalyzeWarnsAboutLowDiskSpace(t *testing.T) {
 		switch r.URL.Path {
 		case "/health/ready":
 			io.WriteString(w, `{"status":"ready"}`)
-		case "/api/v1/status":
-			io.WriteString(w, `{"apiVersion":1,"inventory":{"state":"ready"},"storage":{"extensions":{"total":2199023255552,"used":2089072092774,"free":107374182400,"low":true}}}`)
-		case "/api/v1/extensions":
+		case "/api/v2/status":
+			io.WriteString(w, `{"apiVersion":2,"inventory":{"state":"ready"},"storage":{"extensions":{"total":2199023255552,"used":2089072092774,"free":107374182400,"low":true}}}`)
+		case "/api/v2/extensions":
 			io.WriteString(w, `{"packages":[],"total":0}`)
-		case "/api/v1/sync-runs":
+		case "/api/v2/sync-runs":
 			io.WriteString(w, `[]`)
 		default:
 			w.WriteHeader(404)

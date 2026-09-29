@@ -37,6 +37,7 @@ type scan struct {
 	seen        int
 	done, total int
 	changed     int
+	grew        map[string]bool // extensions that gained stored versions, trimmed to their limit afterwards
 }
 
 type fileState struct {
@@ -47,7 +48,7 @@ type fileState struct {
 }
 
 func (s *Server) reconcileStorage(full bool, progress func(done, total int)) (int, error) {
-	sc := &scan{s: s, progress: progress}
+	sc := &scan{s: s, progress: progress, grew: map[string]bool{}}
 	if sc.progress == nil {
 		sc.progress = func(int, int) {}
 	}
@@ -74,6 +75,14 @@ func (s *Server) reconcileStorage(full bool, progress func(done, total int)) (in
 	}
 	if e == nil {
 		e = sc.settle()
+	}
+	for id := range sc.grew {
+		if e != nil {
+			break
+		}
+		var n int
+		n, e = s.trim(id)
+		sc.changed += n
 	}
 	if e == nil {
 		_, e = s.db.DB.Exec(`INSERT OR IGNORE INTO meta VALUES('files_trusted','1')`)
@@ -511,6 +520,9 @@ func (sc *scan) settle() error {
 				}
 				status, name := p.Status, p.Filename
 				p = settled(p, held[p.Key()])
+				if p.Status == "stored" && status != "stored" {
+					sc.grew[strings.ToLower(p.ID)] = true
+				}
 				if p.Status != status {
 					sc.changed++
 					if p.Status == "conflict" {
