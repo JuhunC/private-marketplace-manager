@@ -119,7 +119,6 @@ type Report struct {
 	Discovered  int        `json:"discovered"`
 	Stored      int        `json:"stored"`
 	Skipped     int        `json:"skipped"`
-	Deleted     int        `json:"deleted"`     // versions an administrator deleted; not collected again
 	BeyondLimit int        `json:"beyondLimit"` // packages older than the extension's version limit; not downloaded
 	Failed      int        `json:"failed"`
 	Status      string     `json:"status"`
@@ -244,10 +243,10 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 			report.Artifacts = append(report.Artifacts, artifacts...)
 			continue
 		}
-		// Ask the manager about every package first: which are stored, which an operator deleted, and how
-		// many of the newest versions this extension keeps, so only packages that will be kept are downloaded.
+		// Ask the manager about every package first: which are stored, and how many of the newest versions
+		// this extension keeps, so only packages that will be kept are downloaded. Deleted versions within
+		// the limit are collected again.
 		stored := map[string]vsix.Package{}
-		deleted := map[string]bool{}
 		keep := 0
 		for start := 0; start < len(artifacts) && err == nil; start += 500 {
 			keys := []string{}
@@ -256,14 +255,10 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 			}
 			var check struct {
 				Packages map[string]vsix.Package `json:"packages"`
-				Deleted  []string                `json:"deleted"`
 				Limits   map[string]int          `json:"limits"`
 			}
 			if err = r.apiJSON(ctx, "POST", "/api/v2/extensions/check", map[string]any{"keys": keys}, &check); err == nil {
 				maps.Copy(stored, check.Packages)
-				for _, k := range check.Deleted {
-					deleted[k] = true
-				}
 				keep = check.Limits[id]
 			}
 		}
@@ -272,14 +267,12 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 			report.Errors = append(report.Errors, Failure{id, err.Error()})
 			continue
 		}
-		wanted := newest(artifacts, deleted, keep)
+		wanted := newest(artifacts, keep)
 		var queue []Artifact
 		for _, a := range artifacts {
 			switch p, ok := stored[a.Key()]; {
 			case ok && p.Status == "stored" && p.Prerelease == a.Prerelease:
 				report.Skipped++
-			case deleted[a.Key()]:
-				report.Deleted++
 			case !wanted[a.Version]:
 				report.BeyondLimit++
 			default:
@@ -302,8 +295,6 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 						fmt.Fprintf(r.Log, "Stored %s\n", a.Key())
 					case refused && se.apiCode == "retention": // the limit changed during the run
 						report.BeyondLimit++
-					case refused && se.apiCode == "deleted":
-						report.Deleted++
 					default:
 						report.Failed++
 						if len(report.Errors) < 200 {
@@ -351,12 +342,11 @@ func (r *Runner) Run(ctx context.Context, listPath string, discover bool) (Repor
 	return report, nil
 }
 
-// newest picks the versions a limit keeps: the keep newest versions with a package not deleted by an
-// operator. keep 0 keeps every version.
-func newest(artifacts []Artifact, deleted map[string]bool, keep int) map[string]bool {
+// newest picks the versions a limit keeps: the keep newest versions. keep 0 keeps every version.
+func newest(artifacts []Artifact, keep int) map[string]bool {
 	var versions []string
 	for _, a := range artifacts {
-		if !deleted[a.Key()] && !slices.Contains(versions, a.Version) {
+		if !slices.Contains(versions, a.Version) {
 			versions = append(versions, a.Version)
 		}
 	}

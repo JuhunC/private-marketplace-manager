@@ -14,7 +14,7 @@ No GitHub Actions, SSH, SFTP, or Docker installation is needed on the sync compu
 ## Downloads
 
 - [Latest release: sync and MCP executables](https://github.com/JuhunC/private-marketplace-manager/releases/latest)
-- Manager container: `ghcr.io/juhunc/private-marketplace-manager:0.8.0`
+- Manager container: `ghcr.io/juhunc/private-marketplace-manager:0.8.1`
 - [Deployment guide](docs/deployment.md) · [Sync guide](docs/sync.md) · [Administrator MCP](docs/mcp.md) · [REST API](docs/api.md)
 
 Native client archives are published for Windows, Linux, and macOS on x64 (`amd64`) and ARM64. Verify the release's `SHA256SUMS` before running. Binaries contain their runtime; Go, Python, and PowerShell are not required. The Linux server image supports x64/ARM64. Native CI covers Linux x64, Windows x64, and macOS ARM64; the other architectures are cross-built and need a pilot on your actual machine. macOS binaries are not Apple-notarized; follow your organization's executable approval process. Minimum supported OS versions follow the release's Go toolchain (currently Go 1.27).
@@ -24,7 +24,7 @@ Native client archives are published for Windows, Linux, and macOS on x64 (`amd6
 An operator needs to provision the container once with write access to the existing extension folder. Subsequent transfers only need API access.
 
 ```sh
-docker pull ghcr.io/juhunc/private-marketplace-manager:0.8.0
+docker pull ghcr.io/juhunc/private-marketplace-manager:0.8.1
 ```
 
 Use the [ready-to-use Compose deployment](deploy/README.md), including a fully annotated [`.env.example`](deploy/.env.example). Set the existing extension directory, a separate persistent state directory, and the exact internal HTTPS origin. The setup generates a random API token and separate operator password; example credentials are deliberately not committed. The container's default UID/GID is `10001:10001`. Bind it behind your internal TLS reverse proxy.
@@ -64,10 +64,10 @@ Start with the read-only `manager_analyze` tool. The two repair tools are additi
 - Stream to a temporary `.part` file, validate ZIP/manifests and hash, flush, then atomically publish a final VSIX name. No partial `.vsix` files are exposed.
 - Identity is extension ID + exact version + target platform. Identical retries are safe; changed bytes for the same identity return `409` without replacement.
 - SQLite records durable inventory and upload receipts; a background startup scan reconciles journal/file state and inventories pre-existing valid VSIXs as unmanaged. It rehashes only new or changed files (by size and modification time), so restarts stay fast for millions of files. The manager serves at once; inventory, upload, and download requests return 503 until the scan finishes.
-- A version limit keeps each extension's newest N versions: set a library default on the webpage (or `PUT /api/v2/limit`) and override it per extension. Older versions are deleted from disk and kept in the inventory as deleted, sync downloads only versions within the limit, and uploads of older versions are refused. With no limit (the default), previous versions are never deleted automatically. An operator can also delete an extension's versions from the earliest through a chosen version, or the whole extension, from the webpage or `POST /api/v2/catalog/{id}/delete`; the files leave the disk while the inventory keeps those versions marked `deleted`, and marketplace-sync does not collect them again. One manager owns the state/extension directory; do not use other writers concurrently.
+- A version limit keeps each extension's newest N versions: set a library default on the webpage (or `PUT /api/v2/limit`) and override it per extension. Older versions are deleted from disk and kept in the inventory as deleted, sync downloads only versions within the limit, and uploads of older versions are refused. With no limit (the default), previous versions are never deleted automatically. An operator can also delete an extension's versions from the earliest through a chosen version, or the whole extension, from the webpage or `POST /api/v2/catalog/{id}/delete`; the files leave the disk while the inventory keeps those versions marked `deleted`. A deleted version can be uploaded again, and marketplace-sync collects it again, while it is within the version limit. One manager owns the state/extension directory; do not use other writers concurrently.
 - Manager storage confirmation does not prove the marketplace exposes that historical version to VS Code. Test multi-version/platform behavior against your deployed Microsoft container.
 - “All versions” means all records/assets still exposed by the public source. Removed, hidden, or no-longer-downloadable releases cannot be reconstructed; discovery/download failures are reported. The gallery endpoint is an upstream implementation detail and may change.
-- SHA-256 and manifest validation establish transfer consistency, not publisher authenticity. Publisher-signature verification, malware scanning, granular multi-user roles, automatic marketplace visibility checks, and version pruning are outside v0.8.0. One operator password and one API token are supported; restart to rotate secrets.
+- SHA-256 and manifest validation establish transfer consistency, not publisher authenticity. Publisher-signature verification, malware scanning, granular multi-user roles, and automatic marketplace visibility checks are outside v0.8.1. One operator password and one API token are supported; restart to rotate secrets.
 - Uploads are synchronous: `201` means stored, `200` means identical content already stored. Failed transfers can be retried safely. See the API guide for limits and error codes.
 
 ## Build and test
@@ -80,7 +80,7 @@ go vet ./...
 go build ./cmd/manager
 go build ./cmd/marketplace-sync
 go build ./cmd/marketplace-mcp
-./scripts/release.sh v0.8.0
+./scripts/release.sh v0.8.1
 ```
 
-The manager uses pure-Go SQLite. The sync and MCP clients have no SQLite dependency. Container builds are multi-stage and run as a non-root user. `IMPLEMENTATION_PLAN.md` is the design roadmap; the behavior described here and in `docs/` is the delivered v0.8.0 contract.
+The manager uses pure-Go SQLite. The sync and MCP clients have no SQLite dependency. Container builds are multi-stage and run as a non-root user. `IMPLEMENTATION_PLAN.md` is the design roadmap; the behavior described here and in `docs/` is the delivered v0.8.1 contract.

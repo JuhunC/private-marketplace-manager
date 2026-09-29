@@ -1,15 +1,12 @@
-Private Marketplace Manager v0.8.0 adds version limits, so the library keeps only each extension's newest versions on disk, and renews the REST API as version 2.
+Private Marketplace Manager v0.8.1 lets deleted versions be uploaded again, so the version limit alone decides what the library keeps.
 
-**Upgrade order: the manager first, then every `marketplace-sync` and `marketplace-mcp`.** API v1 is retired. Older clients stop at startup with "unsupported manager API version 2" until updated, instead of downloading versions the manager would refuse; the new clients report that an older manager "does not serve API v2".
+- Uploads: a deleted version can be uploaded again through the REST API, the webpage, or `marketplace-mcp` while it is within the extension's version limit. It is stored again and its `deletedAt`/`deletedBy` are cleared. The `restore=true` flag is no longer needed (and is ignored); the 409 `deleted` refusal is gone. Versions older than the limit are still refused with 409 `retention`.
+- `marketplace-sync`: deleted versions within the limit are collected again at the next run. This also makes raising a limit and syncing again bring back versions the limit removed, as the v0.8.0 documentation described; in v0.8.0 they stayed skipped.
+- Deleting now frees space until the next sync for versions within the limit. To keep versions away, lower the limit or remove the extension from the sync list. The webpage's delete confirmation says so.
+- API: still version 2. `POST /api/v2/extensions/check` keeps reporting deleted keys in `deleted`, for information. The sync report no longer has a `deleted` count.
+- Manager image: `ghcr.io/juhunc/private-marketplace-manager:0.8.1` for Linux x64/ARM64.
 
-- Version limits: in the storage panel, keep the latest N versions of each extension (0 keeps every version, the default). Any extension can set its own limit or keep every version on its page. Versions are ordered by version number, stable and prerelease counted together, and each version includes all its platform packages.
-- Preview, then delete: before a limit applies, a confirmation shows how many versions, package files, and bytes it removes across how many extensions. Older versions are deleted from disk and kept in the inventory as deleted, labelled as removed by the version limit.
-- Kept within the limit: an upload that adds a newer version deletes the oldest beyond the limit; a scan that finds VSIX files added by hand trims their extensions; uploads of older versions, including restores, are refused with 409 `retention`. Raise a limit and sync again to bring versions back.
-- API v2: every endpoint moves from `/api/v1` to `/api/v2` and `GET /status` reports `"apiVersion": 2` with the library `limit`. New endpoints `GET /limit`, `PUT /limit`, and `PUT /catalog/{id}/limit` read and set limits, with `dryRun` previews. `POST /extensions/check` returns each extension's limit in `limits`; catalog entries report `keep` and `keepSource`; deleted packages report `deletedBy` (`operator` or `limit`). `GET /api/v1/status` answers with version 2 so old clients stop cleanly; other v1 paths return 410 `api_version`. See "Changes from API v1" in the API guide.
-- `marketplace-sync`: downloads only the newest versions within each extension's limit and reports the rest as `beyondLimit`; a limit lowered during a run is counted the same way rather than as a failure.
-- Manager image: `ghcr.io/juhunc/private-marketplace-manager:0.8.0` for Linux x64/ARM64.
-
-Upgrading from v0.7.0: set `MANAGER_IMAGE` to the new tag (or use the updated Compose file) and restart; the state database gains its limits table automatically and no limit applies until you set one. Then install the v0.8.0 `marketplace-sync` and `marketplace-mcp` archives. Update scripts and integrations that call `/api/v1` to `/api/v2`.
+Upgrading from v0.8.0: set `MANAGER_IMAGE` to the new tag (or use the updated Compose file) and restart; no migration is required. Install the v0.8.1 `marketplace-sync` so deleted versions are collected again; v0.8.0 clients keep working but still skip them. Upgrading from v0.7.0 or earlier: follow the v0.8.0 notes (upgrade the manager first, then every client, because API v1 is retired).
 
 Download the archive matching the tool, OS, and CPU, then verify `SHA256SUMS`. No Go, Python, or PowerShell installation is required. See the MCP guide before granting an MCP host access. Repair tools are additive but use the same API token as synchronization, so retain human approval in the MCP host.
 

@@ -61,7 +61,7 @@ The `.env` file controls these Compose settings:
 
 | Variable | Example | Purpose |
 |---|---|---|
-| `MANAGER_IMAGE` | `ghcr.io/juhunc/private-marketplace-manager:0.8.0` | Pinned manager image |
+| `MANAGER_IMAGE` | `ghcr.io/juhunc/private-marketplace-manager:0.8.1` | Pinned manager image |
 | `PUBLIC_URL` | `https://marketplace-manager.corp.example.com` | Exact browser-facing origin |
 | `MANAGER_BIND_ADDRESS` / `MANAGER_HOST_PORT` | `127.0.0.1` / `8080` | Host listener used by the TLS proxy |
 | `EXTENSIONS_HOST_DIR` | `/srv/vsmarketplace/extensions` | Existing Microsoft marketplace VSIX directory |
@@ -111,7 +111,7 @@ The receiver does not restart the existing marketplace. Its dashboard deliberate
 - Back up the extension folder and state directory while the manager is stopped. Restore together, then start to reconcile. Keep settings and secrets in your organization's approved backup/secret system.
 - Rotate token/password by replacing secret files and restarting; sessions end. Use a new token when retiring a client machine.
 - To cap disk use, set a version limit in the storage panel of the webpage: the library keeps each extension's newest N versions (stable and prerelease counted together), and any extension can set its own limit or keep every version on its page. A preview shows what will be deleted before a limit applies. Older versions are deleted from disk and kept in the inventory as deleted; marketplace-sync downloads only versions within the limit, uploads of older versions are refused (409 `retention`), and a newer upload deletes the oldest beyond the limit. Raise a limit and sync again to bring versions back.
-- To free space or withdraw versions, open the extension on the webpage and delete from the earliest version through a chosen one, or delete the whole extension (or use `POST /api/v2/catalog/{id}/delete`). A preview shows the versions, files, and size first. Files leave the disk; the inventory keeps the versions marked deleted, and marketplace-sync no longer collects them. Upload a VSIX from the webpage or `marketplace-mcp` to restore a version. Remove an identifier from the sync list to stop collecting its future versions too.
+- To free space or withdraw versions, open the extension on the webpage and delete from the earliest version through a chosen one, or delete the whole extension (or use `POST /api/v2/catalog/{id}/delete`). A preview shows the versions, files, and size first. Files leave the disk and the inventory keeps the versions marked deleted. Deleting frees space now; any upload brings a deleted version back, and marketplace-sync collects it again at its next run, while the version is within the extension's version limit. To keep versions away, lower the limit or remove the identifier from the sync list.
 - Manager v0.8.0 serves API v2 and retires API v1. Upgrade the manager first, then every `marketplace-sync` and `marketplace-mcp` installation; older clients stop with "unsupported manager API version 2" until updated, and new clients report that an older manager "does not serve API v2".
 - Application rollback: stop the manager and restore a compatible image/state backup. No application update should remove historical VSIXs.
 

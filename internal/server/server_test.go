@@ -703,16 +703,12 @@ func TestDeleteVersionsKeepsThemIndexed(t *testing.T) {
 	if _, e := os.Stat(filepath.Join(c.Extensions, "test.hello-1.5.1-universal.vsix")); !os.IsNotExist(e) || statusOf(t, s, "test.hello@1.5.1@universal") != "deleted" {
 		t.Fatal("scan should finish an interrupted deletion and keep the record deleted")
 	}
-	if code, v := upload(t, h, files["1.0.0"], "again"); code != 409 || v["code"] != "deleted" {
-		t.Fatalf("sync-style upload of a deleted version: %d %v", code, v)
+	// Any upload brings a deleted version back while it is within the version limit.
+	if code, v := upload(t, h, files["1.0.0"], "again"); code != 201 || statusOf(t, s, "test.hello@1.0.0@universal") != "stored" {
+		t.Fatalf("re-upload of a deleted version: %d %v", code, v)
 	}
-	r = request(t, h, "POST", "/api/v2/extensions?restore=true", files["1.0.0"], auth)
-	r.Body.Close()
-	if r.StatusCode != 201 || statusOf(t, s, "test.hello@1.0.0@universal") != "stored" {
-		t.Fatalf("restore: %d", r.StatusCode)
-	}
-	if p, _ = s.db.Get("test.hello@1.0.0@universal"); p.DeletedAt != "" {
-		t.Fatal("a restored version still carries its deletion time")
+	if p, _ = s.db.Get("test.hello@1.0.0@universal"); p.DeletedAt != "" || p.DeletedBy != "" {
+		t.Fatalf("a re-uploaded version still carries its deletion: %+v", p)
 	}
 	if code, done := remove(`{"all":true}`); code != 200 || done["packages"] != float64(2) {
 		t.Fatalf("delete all: %d %v", code, done)
@@ -774,15 +770,13 @@ func TestVersionLimit(t *testing.T) {
 	if code, v := upload(t, h, testutil.VSIX("hello", "1.1.5", "", false, nil), "older"); code != 409 || v["code"] != "retention" {
 		t.Fatalf("upload older than the limit: %d %v", code, v)
 	}
-	r := request(t, h, "POST", "/api/v2/extensions?restore=true", testutil.VSIX("hello", "1.1.0", "", false, nil), auth)
-	r.Body.Close()
-	if r.StatusCode != 409 {
-		t.Fatalf("restoring a version beyond the limit: %d", r.StatusCode)
+	if code, v := upload(t, h, testutil.VSIX("hello", "1.1.0", "", false, nil), "deleted-older"); code != 409 || v["code"] != "retention" {
+		t.Fatalf("re-uploading a deleted version beyond the limit: %d %v", code, v)
 	}
 	if code, _ := upload(t, h, testutil.VSIX("hello", "2.1.0", "", false, nil), "newer"); code != 201 || statusOf(t, s, "test.hello@1.2.0@universal") != "deleted" {
 		t.Fatalf("a newer upload should push the oldest kept version out: %d", code)
 	}
-	r = request(t, h, "POST", "/api/v2/extensions/check", []byte(`{"keys":["test.hello@2.1.0@universal","test.other@1.0.0@universal"]}`), auth)
+	r := request(t, h, "POST", "/api/v2/extensions/check", []byte(`{"keys":["test.hello@2.1.0@universal","test.other@1.0.0@universal"]}`), auth)
 	var check struct {
 		Limits map[string]int `json:"limits"`
 	}
@@ -815,6 +809,13 @@ func TestVersionLimit(t *testing.T) {
 	_, status := getJSON(t, h, "/api/v2/status", auth)
 	if status["limit"].(map[string]any)["keep"] != float64(2) || status["apiVersion"] != float64(2) {
 		t.Fatalf("status: %v", status)
+	}
+	// Raising the limit lets a version the limit deleted come back.
+	if code, _ := put("/api/v2/limit", `{"keep":3}`); code != 200 {
+		t.Fatalf("raise the limit: %d", code)
+	}
+	if code, v := upload(t, h, testutil.VSIX("hello", "1.2.0", "", false, nil), "back"); code != 201 || statusOf(t, s, "test.hello@1.2.0@universal") != "stored" {
+		t.Fatalf("re-upload after raising the limit: %d %v", code, v)
 	}
 }
 

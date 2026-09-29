@@ -385,14 +385,6 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "name": "restore",
-            "in": "query",
-            "schema": {
-              "type": "boolean"
-            },
-            "description": "Bring back a version an operator deleted"
           }
         ],
         "requestBody": {
@@ -414,7 +406,7 @@
             "description": "Validated file durably stored"
           },
           "409": {
-            "description": "Identity or idempotency conflict, a deleted version uploaded without restore=true, or `retention`: older than the extension's version limit"
+            "description": "Identity or idempotency conflict, or `retention`: older than the extension's version limit"
           },
           "413": {
             "description": "Upload too large"

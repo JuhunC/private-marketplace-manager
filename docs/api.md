@@ -8,7 +8,7 @@ API v2 arrived with manager v0.8.0 and its version limits:
 
 - Every endpoint moved from `/api/v1` to `/api/v2`; `GET /status` reports `"apiVersion": 2`.
 - Uploads of a version older than the extension's newest kept versions are refused with 409 `retention`, and an upload that adds a newer version deletes the oldest beyond the limit.
-- `POST /extensions/check` also returns `limits` (each requested extension's limit) and `deleted`, so clients download only versions that will be kept.
+- `POST /extensions/check` also returns `limits` (each requested extension's limit), so clients download only versions that will be kept, and `deleted`, the requested keys that are deleted and may be uploaded again.
 - New endpoints `GET /limit`, `PUT /limit`, and `PUT /catalog/{id}/limit` read and set limits; catalog entries report `keep` and `keepSource`; deleted packages report `deletedBy`.
 - `GET /api/v1/status` still answers, with `"apiVersion": 2`, so older clients stop with an "unsupported manager API version" message. Every other `/api/v1` path returns 410 `api_version`. Upgrade the manager first, then `marketplace-sync` and `marketplace-mcp` v0.8.0 or later.
 
@@ -92,14 +92,14 @@ A version limit keeps an extension's newest N versions, ordered by version numbe
 
 Setting or lowering a limit deletes the older versions at once (preview with `dryRun`). Deletions work as below, with `deletedBy` set to `limit` instead of `operator`. Afterwards:
 
-- An upload of a version older than the newest N kept versions returns 409 `retention`, including `restore=true` uploads. Raise the limit to bring such versions back.
+- An upload of a version older than the newest N kept versions returns 409 `retention`, even if the version was deleted before. Raise the limit to bring such versions back.
 - An upload of a newer version is stored, then the oldest version beyond the limit is deleted.
 - A startup or reconcile scan that inventories new files trims their extensions to the limit.
 - marketplace-sync reads `limits` from `POST /extensions/check` and downloads only the newest N versions, counting the rest as `beyondLimit` in its report.
 
 ### Deleted versions
 
-Deleting versions removes their files from the extension folder but keeps their records with status `deleted`, a `deletedAt` time, and `deletedBy` (`operator` or `limit`), so the webpage and API still list them. They are not counted as versions, packages, platforms, or needing attention; `GET /status` reports them as `deleted` and `deletedBytes`. `POST /extensions/check` returns requested keys that were deleted in `deleted`, and marketplace-sync skips them without downloading. Uploading a deleted version returns 409 `deleted` unless the request adds `restore=true`, which the webpage and `marketplace-mcp` upload do to bring a version back. If the manager stops before a deletion's files are gone, the next scan removes files holding exactly the deleted bytes. The action is recorded in the audit log as `deleted_versions`.
+Deleting versions removes their files from the extension folder but keeps their records with status `deleted`, a `deletedAt` time, and `deletedBy` (`operator` or `limit`), so the webpage and API still list them. They are not counted as versions, packages, platforms, or needing attention; `GET /status` reports them as `deleted` and `deletedBytes`. `POST /extensions/check` returns requested keys that were deleted in `deleted`. Deleting frees space but does not block a version: any upload of a deleted version within the version limit stores it again and clears `deletedAt` and `deletedBy`, and marketplace-sync collects such versions again. Lower the limit or remove the extension from the sync list to keep versions away. If the manager stops before a deletion's files are gone, the next scan removes files holding exactly the deleted bytes. The action is recorded in the audit log as `deleted_versions`.
 
 `POST /admin/reconcile` uses the same bearer credential and serializes against active uploads. It never chooses between conflicting bytes, and the only VSIX files it deletes are leftovers of versions an operator already deleted. It may remove abandoned `.upload-*.part` staging files, updates inventory statuses, and records an audit event. The response includes the number of changed records, counts by status, and `fullVerify`. Routine scans (startup and reconcile without `verify=full`) remember each file's size and modification time and rehash only new or changed files; `verify=full` rehashes every file, which takes time proportional to the archive's size.
 
@@ -124,7 +124,7 @@ Errors contain `code`, `error`, and `requestId`:
 | 400 | Invalid request/identifier/key | Fix input |
 | 401/403 | Authentication or browser origin/CSRF failure | Fix credential/origin; do not retry blindly |
 | 404 | Package/receipt unavailable | Reconcile or retry the original upload |
-| 409 | Different bytes at same identity, reused key, publication conflict, `deleted` version, or `retention` (older than the version limit) | Investigate; never overwrite automatically. Add `restore=true` to bring back a deleted version; raise the limit for an older one |
+| 409 | Different bytes at same identity, reused key, publication conflict, or `retention` (older than the version limit) | Investigate; never overwrite automatically. Raise the limit to accept an older version |
 | 410 `api_version` | An API v1 path | Update the client to API v2 |
 | 413 | Upload/body exceeds limit | Review size limits |
 | 422 | Invalid ZIP/manifests, identity, or checksum | Inspect original package |

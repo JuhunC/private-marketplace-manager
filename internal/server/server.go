@@ -699,10 +699,6 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 			fail(w, 409, "content_conflict", "conflicting files require operator reconciliation")
 			return
 		}
-		if old.Status == "deleted" && r.URL.Query().Get("restore") != "true" {
-			fail(w, 409, "deleted", "an administrator deleted this version; upload it with restore=true to bring it back")
-			return
-		}
 		if old.SHA256 != p.SHA256 {
 			fail(w, 409, "content_conflict", "identity already exists with different bytes")
 			return
@@ -719,7 +715,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 				fail(w, 409, "content_conflict", "stored file changed outside manager")
 				return
 			}
-			old.Status, old.DeletedAt = "stored", ""
+			old.Status, old.DeletedAt, old.DeletedBy = "stored", "", ""
 			if e = s.db.Publish(old, info.ModTime().UnixNano()); e != nil {
 				fail(w, 500, "database", "cannot confirm existing file")
 				return

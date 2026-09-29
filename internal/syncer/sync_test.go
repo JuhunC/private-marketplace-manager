@@ -127,7 +127,7 @@ func TestSyncWaitsForManagerInventoryScan(t *testing.T) {
 		t.Fatalf("failed scan did not stop the run: %v", e)
 	}
 }
-func TestSyncSkipsDeletedVersions(t *testing.T) {
+func TestSyncCollectsDeletedVersionsWithinTheLimit(t *testing.T) {
 	var downloads atomic.Int32
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -135,18 +135,16 @@ func TestSyncSkipsDeletedVersions(t *testing.T) {
 			galleryHandler(t, w, r)
 		case strings.HasPrefix(r.URL.Path, "/asset/"):
 			downloads.Add(1)
-			w.Write(testutil.VSIX("one", "2.0.0", "linux-arm64", false, nil))
+			w.Write(fixture(r.URL.Path))
 		case r.URL.Path == "/api/v2/status":
 			io.WriteString(w, `{"apiVersion":2}`)
 		case r.URL.Path == "/api/v2/extensions/check":
-			io.WriteString(w, `{"packages":{},"deleted":["test.one@1.0.0@universal"]}`)
+			// An operator deleted 1.0.0; with no limit it is collected again.
+			io.WriteString(w, `{"packages":{},"deleted":["test.one@1.0.0@universal"],"limits":{"test.one":0}}`)
 		case r.URL.Path == "/api/v2/extensions":
-			if strings.Contains(r.URL.RawQuery, "restore") {
-				t.Error("sync must not restore deleted versions")
-			}
-			io.Copy(io.Discard, r.Body)
+			p, _ := vsix.Inspect(saved(t, r.Body))
 			w.WriteHeader(201)
-			json.NewEncoder(w).Encode(map[string]any{"package": map[string]any{"id": "test.one", "version": "2.0.0", "platform": "linux-arm64", "status": "stored", "sha256": vsixHash(t, testutil.VSIX("one", "2.0.0", "linux-arm64", false, nil))}})
+			json.NewEncoder(w).Encode(map[string]any{"package": p})
 		case r.URL.Path == "/api/v2/sync-runs":
 			io.WriteString(w, `{"ok":true}`)
 		default:
@@ -175,7 +173,7 @@ func TestSyncSkipsDeletedVersions(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(clone)
 	})
 	report, e := r.Run(context.Background(), list, false)
-	if e != nil || report.Stored != 1 || report.Deleted != 1 || downloads.Load() != 1 {
+	if e != nil || report.Stored != 2 || downloads.Load() != 2 {
 		t.Fatalf("report %+v, %d downloads, %v", report, downloads.Load(), e)
 	}
 }
@@ -235,6 +233,24 @@ func TestSyncDownloadsOnlyVersionsWithinTheLimit(t *testing.T) {
 	if e != nil || report.Stored != 1 || report.BeyondLimit != 3 || report.Failed != 0 || downloads.Load() != 2 {
 		t.Fatalf("report %+v, %d downloads, %v", report, downloads.Load(), e)
 	}
+}
+
+// fixture serves the VSIX for a gallery asset path such as /asset/one/2.
+func fixture(path string) []byte {
+	parts := strings.Split(path, "/")
+	if parts[3] == "2" {
+		return testutil.VSIX(parts[2], "2.0.0", "linux-arm64", false, nil)
+	}
+	return testutil.VSIX(parts[2], "1.0.0", "", false, nil)
+}
+
+// saved writes an uploaded body to a file for inspection.
+func saved(t *testing.T, body io.Reader) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "upload.vsix")
+	b, _ := io.ReadAll(body)
+	os.WriteFile(f, b, 0600)
+	return f
 }
 
 func vsixHash(t *testing.T, b []byte) string {

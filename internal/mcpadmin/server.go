@@ -187,7 +187,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "manager_upload_vsix", Title: "Upload or restore a VSIX", Annotations: additive("Upload or restore a VSIX"),
-		Description: "Validate one local VSIX and upload it idempotently. This can restore a missing package or one an administrator deleted; it never replaces different bytes for the same extension, version, and platform.",
+		Description: "Validate one local VSIX and upload it idempotently. This can restore a missing or deleted package within the extension's version limit; it never replaces different bytes for the same extension, version, and platform.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UploadInput) (*mcp.CallToolResult, any, error) {
 		if strings.TrimSpace(in.Path) == "" {
 			return nil, nil, fmt.Errorf("path is required")
