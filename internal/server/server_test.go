@@ -964,6 +964,9 @@ func TestSummariesAreBuiltAfterUpgrade(t *testing.T) {
 }
 
 func TestStatePathWithQuestionMarkIsRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file names cannot contain '?'; the manager ships as a Linux container")
+	}
 	dir := t.TempDir()
 	_, e := New(Config{Extensions: filepath.Join(dir, "extensions"), State: filepath.Join(dir, "state?x"), Token: testToken, Password: "a-long-test-password", PublicURL: "http://localhost", MaxUpload: 1 << 20})
 	if e == nil || !strings.Contains(e.Error(), "must not contain '?'") {
