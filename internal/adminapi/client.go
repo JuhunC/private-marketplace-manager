@@ -172,6 +172,8 @@ func decodeError(resp *http.Response) error {
 type UploadResult struct {
 	Package   vsix.Package `json:"package"`
 	Duplicate bool         `json:"duplicate"`
+	// RemovedVersions are older versions the extension's version limit deleted after this upload.
+	RemovedVersions []string `json:"removedVersions,omitempty"`
 }
 
 func (c *Client) UploadVSIX(ctx context.Context, filename string) (UploadResult, error) {

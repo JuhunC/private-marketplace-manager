@@ -53,7 +53,7 @@ limits, and secret files Docker will use. The bind mounts use
 `create_host_path: false`, so a misspelled host path fails instead of silently
 creating an empty directory.
 
-The example exposes only `127.0.0.1:8080` for a TLS reverse proxy on the same host. A complete Nginx server-block example is provided at `deploy/nginx/private-marketplace-manager.conf.example`; change its server name and internal-PKI certificate paths. For a containerized proxy, attach the manager to its private Docker network instead. Use your approved internal certificate. Configure proxy upload size/timeouts to accommodate the maximum VSIX (default 2 GiB and up to 30 minutes). Avoid exposing the raw HTTP port outside trusted local/private proxy connections.
+The example exposes only `127.0.0.1:8080` for a TLS reverse proxy on the same host. A complete Nginx server-block example is provided at `deploy/nginx/private-marketplace-manager.conf.example`; change its server name and internal-PKI certificate paths. For a containerized proxy, attach the manager to its private Docker network instead. Use your approved internal certificate. Configure proxy upload size/timeouts to accommodate the maximum VSIX (default 2 GiB and up to 30 minutes). Avoid exposing the raw HTTP port outside trusted local/private proxy connections. Set `TRUSTED_PROXIES` to the proxy's address as the manager sees it (for nginx on the host with this Compose file, the Docker network gateway from `docker network inspect private-marketplace-manager_default`) so login throttling counts each browser from `X-Forwarded-For`; without it, all logins through the proxy share one throttle. Never list addresses of untrusted clients: a trusted proxy's `X-Forwarded-For` is believed.
 
 ## 3. Configuration reference
 
@@ -61,7 +61,7 @@ The `.env` file controls these Compose settings:
 
 | Variable | Example | Purpose |
 |---|---|---|
-| `MANAGER_IMAGE` | `ghcr.io/juhunc/private-marketplace-manager:0.8.1` | Pinned manager image |
+| `MANAGER_IMAGE` | `ghcr.io/juhunc/private-marketplace-manager:0.9.0` | Pinned manager image |
 | `PUBLIC_URL` | `https://marketplace-manager.corp.example.com` | Exact browser-facing origin |
 | `MANAGER_BIND_ADDRESS` / `MANAGER_HOST_PORT` | `127.0.0.1` / `8080` | Host listener used by the TLS proxy |
 | `EXTENSIONS_HOST_DIR` | `/srv/vsmarketplace/extensions` | Existing Microsoft marketplace VSIX directory |
@@ -70,6 +70,7 @@ The `.env` file controls these Compose settings:
 | `API_TOKEN_SECRET_FILE` | `./secrets/api-token.txt` | Generated sync-client token file |
 | `ADMIN_PASSWORD_SECRET_FILE` | `./secrets/admin-password.txt` | Generated browser password file |
 | `MAX_UPLOAD_BYTES` | `2147483648` | Maximum compressed VSIX bytes |
+| `TRUSTED_PROXIES` | `172.18.0.1` | Reverse proxy addresses or CIDR ranges whose `X-Forwarded-For` names the client, for login throttling |
 | `CPU_LIMIT` / `MEMORY_LIMIT` / `PIDS_LIMIT` | `2` / `1g` / `128` | Container resource limits |
 | `LOG_MAX_SIZE` / `LOG_MAX_FILES` | `10m` / `5` | Docker JSON log rotation |
 
@@ -82,6 +83,7 @@ The manager receives these application settings from Compose:
 | Variable | Default | Purpose |
 |---|---|---|
 | `PUBLIC_URL` | `http://localhost:8080` | Exact UI origin; production uses HTTPS |
+| `TRUSTED_PROXIES` | empty | Comma-separated reverse proxy addresses or CIDR ranges whose `X-Forwarded-For` is believed for login throttling |
 | `LISTEN_ADDR` | `:8080` | Listen address; built-in container healthcheck assumes port 8080 |
 | `EXTENSIONS_DIR` | `/data/extensions` | Existing VSIX directory |
 | `STATE_DIR` | `/data/state` | Persistent local SQLite state and instance lock |
@@ -109,6 +111,8 @@ The receiver does not restart the existing marketplace. Its dashboard deliberate
 - Avoid external writers while running. Restart the manager or run `POST /api/v2/admin/reconcile` after manual directory changes. An out-of-band edit that keeps both the size and the modification time is not detected by routine scans; run `POST /api/v2/admin/reconcile?verify=full` (or `manager_reconcile_storage` with `fullVerify`) to rehash every file, for example after restoring a backup.
 - If storage fills up, free space without deleting required history, then rerun synchronization. Existing confirmed packages are retained.
 - Back up the extension folder and state directory while the manager is stopped. Restore together, then start to reconcile. Keep settings and secrets in your organization's approved backup/secret system.
+- The storage panel's **Rescan folder** checks the extension folder against the inventory (the same as `POST /api/v2/admin/reconcile`), and **Verify every file** rehashes every VSIX (`?verify=full`), which takes time in proportion to the library's size while uploads wait. Use them after manual changes to the folder or to recover from a failed startup scan.
+- The inventory page and `GET /api/v2/status` read per-extension totals that the manager keeps up to date as packages change, so they stay fast with millions of packages; the first start after upgrading builds them once in the background (about 3 seconds per million packages).
 - Rotate token/password by replacing secret files and restarting; sessions end. Use a new token when retiring a client machine.
 - To cap disk use, set a version limit in the storage panel of the webpage: the library keeps each extension's newest N versions (stable and prerelease counted together), and any extension can set its own limit or keep every version on its page. A preview shows what will be deleted before a limit applies. Older versions are deleted from disk and kept in the inventory as deleted; marketplace-sync downloads only versions within the limit, uploads of older versions are refused (409 `retention`), and a newer upload deletes the oldest beyond the limit. Raise a limit and sync again to bring versions back.
 - To free space or withdraw versions, open the extension on the webpage and delete from the earliest version through a chosen one, or delete the whole extension (or use `POST /api/v2/catalog/{id}/delete`). A preview shows the versions, files, and size first. Files leave the disk and the inventory keeps the versions marked deleted. Deleting frees space now; any upload brings a deleted version back, and marketplace-sync collects it again at its next run, while the version is within the extension's version limit. To keep versions away, lower the limit or remove the identifier from the sync list.

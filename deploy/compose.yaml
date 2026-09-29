@@ -2,7 +2,7 @@ name: "${COMPOSE_PROJECT_NAME:-private-marketplace-manager}"
 
 services:
   manager:
-    image: "${MANAGER_IMAGE:-ghcr.io/juhunc/private-marketplace-manager:0.8.1}"
+    image: "${MANAGER_IMAGE:-ghcr.io/juhunc/private-marketplace-manager:0.9.0}"
     container_name: "${MANAGER_CONTAINER_NAME:-private-marketplace-manager}"
     restart: "${RESTART_POLICY:-unless-stopped}"
     init: true
@@ -14,6 +14,7 @@ services:
       API_TOKEN_FILE: /run/secrets/api_token
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
       MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-2147483648}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
     volumes:
       - type: bind
         source: "${EXTENSIONS_HOST_DIR:?Set the existing VSIX directory}"

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/JuhunC/private-marketplace-manager/internal/store"
 	"github.com/JuhunC/private-marketplace-manager/internal/testutil"
 	"github.com/JuhunC/private-marketplace-manager/internal/vsix"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,13 +23,16 @@ import (
 const testToken = "0123456789012345678901234567890123456789"
 
 // unstarted returns a serving manager whose startup scan has not begun.
-func unstarted(t *testing.T) (*Server, *httptest.Server, Config) {
+func unstarted(t *testing.T, options ...func(*Config)) (*Server, *httptest.Server, Config) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("receiver is a Linux container; Windows CLI tested separately")
 	}
 	dir := t.TempDir()
 	c := Config{Extensions: filepath.Join(dir, "extensions"), State: filepath.Join(dir, "state"), Token: testToken, Password: "a-long-test-password", PublicURL: "http://localhost", MaxUpload: 1 << 20}
+	for _, option := range options {
+		option(&c)
+	}
 	s, e := New(c)
 	if e != nil {
 		t.Fatal(e)
@@ -773,8 +778,8 @@ func TestVersionLimit(t *testing.T) {
 	if code, v := upload(t, h, testutil.VSIX("hello", "1.1.0", "", false, nil), "deleted-older"); code != 409 || v["code"] != "retention" {
 		t.Fatalf("re-uploading a deleted version beyond the limit: %d %v", code, v)
 	}
-	if code, _ := upload(t, h, testutil.VSIX("hello", "2.1.0", "", false, nil), "newer"); code != 201 || statusOf(t, s, "test.hello@1.2.0@universal") != "deleted" {
-		t.Fatalf("a newer upload should push the oldest kept version out: %d", code)
+	if code, v := upload(t, h, testutil.VSIX("hello", "2.1.0", "", false, nil), "newer"); code != 201 || statusOf(t, s, "test.hello@1.2.0@universal") != "deleted" || fmt.Sprint(v["removedVersions"]) != "[1.2.0]" {
+		t.Fatalf("a newer upload should push the oldest kept version out and say so: %d %v", code, v)
 	}
 	r := request(t, h, "POST", "/api/v2/extensions/check", []byte(`{"keys":["test.hello@2.1.0@universal","test.other@1.0.0@universal"]}`), auth)
 	var check struct {
@@ -833,5 +838,135 @@ func TestAPIv1IsRetired(t *testing.T) {
 		if r.StatusCode != 410 || body["code"] != "api_version" {
 			t.Fatalf("%s v1: %d %v", method, r.StatusCode, body)
 		}
+	}
+}
+
+func TestAPIErrorsAreJSON(t *testing.T) {
+	_, h, _ := setup(t)
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	for _, c := range []struct {
+		method, path string
+		status       int
+		code, allow  string
+	}{
+		{"GET", "/api/v2/nope", 404, "not_found", ""},
+		{"POST", "/api/v2/nope", 404, "not_found", ""},
+		{"DELETE", "/api/v2/limit", 405, "method_not_allowed", "GET, HEAD, PUT"},
+		{"PUT", "/api/v2/status", 405, "method_not_allowed", "GET, HEAD"},
+		{"DELETE", "/api/v2/catalog/test.x/limit", 405, "method_not_allowed", "PUT"},
+	} {
+		r := request(t, h, c.method, c.path, nil, auth)
+		var body map[string]string
+		e := json.NewDecoder(r.Body).Decode(&body)
+		r.Body.Close()
+		if e != nil || r.StatusCode != c.status || body["code"] != c.code || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") || r.Header.Get("Allow") != c.allow {
+			t.Fatalf("%s %s: %d %v %q allow=%q (%v)", c.method, c.path, r.StatusCode, body, r.Header.Get("Content-Type"), r.Header.Get("Allow"), e)
+		}
+	}
+	if r := request(t, h, "GET", "/no-such-page", nil, nil); r.StatusCode != 404 || strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("pages outside the API keep the file server's answer: %d %q", r.StatusCode, r.Header.Get("Content-Type"))
+	}
+}
+
+func TestPageSizeAndAuditFilters(t *testing.T) {
+	_, h, _ := setup(t)
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	for i, name := range []string{"alpha", "beta", "gamma"} {
+		if code, _ := upload(t, h, testutil.VSIX(name, "1.0.0", "", false, nil), fmt.Sprint(i)); code != 201 {
+			t.Fatal(code)
+		}
+	}
+	for _, path := range []string{"/api/v2/catalog?pageSize=2", "/api/v2/catalog?limit=2"} {
+		_, body := getJSON(t, h, path, auth)
+		if len(body["extensions"].([]any)) != 2 || body["pageSize"] != float64(2) || body["total"] != float64(3) {
+			t.Fatalf("%s: %v", path, body)
+		}
+	}
+	events := func(query string) []any {
+		t.Helper()
+		r := request(t, h, "GET", "/api/v2/audit-events"+query, nil, auth)
+		defer r.Body.Close()
+		var out []any
+		json.NewDecoder(r.Body).Decode(&out)
+		return out
+	}
+	stored := events("?action=stored&actor=sync-token")
+	if len(stored) != 3 {
+		t.Fatalf("stored events: %v", stored)
+	}
+	first := events("?action=stored&pageSize=2")
+	older := events(fmt.Sprintf("?action=stored&pageSize=2&before=%v", first[1].(map[string]any)["id"]))
+	if len(first) != 2 || len(older) != 1 || older[0].(map[string]any)["detail"] != "test.alpha@1.0.0@universal" {
+		t.Fatalf("paging: %v then %v", first, older)
+	}
+	if none := events("?action=stored&actor=operator"); len(none) != 0 {
+		t.Fatalf("actor filter: %v", none)
+	}
+}
+
+func TestLoginThrottlingUsesTrustedProxyClients(t *testing.T) {
+	loginFrom := func(h *httptest.Server, client string) int {
+		t.Helper()
+		r := request(t, h, "POST", "/api/v2/login", []byte(`{"password":"wrong-password-here"}`), map[string]string{"Origin": "http://localhost", "X-Forwarded-For": client})
+		r.Body.Close()
+		return r.StatusCode
+	}
+	// Behind a trusted proxy, one client's failures do not lock out another.
+	_, proxied, _ := unstarted(t, func(c *Config) {
+		c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	})
+	for range 10 {
+		loginFrom(proxied, "203.0.113.5")
+	}
+	if code := loginFrom(proxied, "203.0.113.5"); code != 429 {
+		t.Fatalf("eleventh failure from one client: %d", code)
+	}
+	if code := loginFrom(proxied, "198.51.100.7, 203.0.113.99"); code != 401 {
+		t.Fatalf("another client behind the proxy was throttled: %d", code)
+	}
+	if code := loginFrom(proxied, "198.51.100.8:4321"); code != 401 {
+		t.Fatalf("a client recorded as address:port was throttled with the proxy: %d", code)
+	}
+	// Without a trusted proxy, a forged X-Forwarded-For cannot dodge throttling.
+	_, direct, _ := unstarted(t)
+	for i := range 10 {
+		loginFrom(direct, fmt.Sprintf("192.0.2.%d", i))
+	}
+	if code := loginFrom(direct, "192.0.2.200"); code != 429 {
+		t.Fatalf("forged addresses escaped throttling: %d", code)
+	}
+}
+
+func TestSummariesAreBuiltAfterUpgrade(t *testing.T) {
+	s, h, c := setup(t)
+	for i, v := range []string{"1.0.0", "2.0.0"} {
+		if code, _ := upload(t, h, testutil.VSIX("hello", v, "", false, nil), fmt.Sprint(i)); code != 201 {
+			t.Fatal(code)
+		}
+	}
+	// A database from v0.8.1 has packages but no summaries.
+	if _, e := s.db.DB.Exec(`DELETE FROM summaries; DELETE FROM summary_dirty; DELETE FROM meta WHERE k='summaries'`); e != nil {
+		t.Fatal(e)
+	}
+	h.Close()
+	s.Close()
+	s, e := New(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	s.Start()
+	s.background.Wait()
+	x, total, e := s.db.Catalog(store.CatalogQuery{Limit: 10})
+	if e != nil || total != 1 || x[0].Versions != 2 || x[0].LatestVersion != "2.0.0" {
+		t.Fatalf("catalog after upgrade: %d %+v %v", total, x, e)
+	}
+}
+
+func TestStatePathWithQuestionMarkIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	_, e := New(Config{Extensions: filepath.Join(dir, "extensions"), State: filepath.Join(dir, "state?x"), Token: testToken, Password: "a-long-test-password", PublicURL: "http://localhost", MaxUpload: 1 << 20})
+	if e == nil || !strings.Contains(e.Error(), "must not contain '?'") {
+		t.Fatalf("state path with '?': %v", e)
 	}
 }

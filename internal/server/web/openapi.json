@@ -3,7 +3,7 @@
   "info": {
     "title": "Private Marketplace Manager",
     "version": "2.0",
-    "description": "Synchronous authenticated VSIX storage, API version 2. See /guide.html for deployment and usage."
+    "description": "Synchronous authenticated VSIX storage, API version 2. See /guide.html for deployment and usage. Unknown API paths return 404 and unsupported methods 405, both as JSON errors."
   },
   "servers": [
     {
@@ -26,7 +26,8 @@
         "in": "cookie",
         "name": "marketplace_session"
       }
-    }
+    },
+    "responses": {}
   },
   "paths": {
     "/api/v2/status": {
@@ -186,20 +187,31 @@
             "description": "Only extensions with missing, pending, or conflicting records"
           },
           {
-            "name": "limit",
+            "name": "pageSize",
             "in": "query",
             "schema": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
             },
-            "description": "Page size, at most 500"
+            "description": "Page size, default 100"
           },
           {
             "name": "offset",
             "in": "query",
             "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "deprecated": true,
+            "schema": {
               "type": "integer"
             },
-            "description": "Zero-based offset"
+            "description": "Deprecated alias of pageSize; unrelated to version limits"
           }
         ],
         "responses": {
@@ -326,18 +338,31 @@
             }
           },
           {
-            "name": "limit",
+            "name": "pageSize",
             "in": "query",
             "schema": {
-              "type": "integer"
-            }
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "description": "Page size, default 100"
           },
           {
             "name": "offset",
             "in": "query",
             "schema": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 0
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "deprecated": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Deprecated alias of pageSize; unrelated to version limits"
           }
         ]
       },
@@ -403,7 +428,7 @@
             "description": "Identical content already stored"
           },
           "201": {
-            "description": "Validated file durably stored"
+            "description": "Validated file durably stored; removedVersions lists older versions the version limit deleted"
           },
           "409": {
             "description": "Identity or idempotency conflict, or `retention`: older than the extension's version limit"
@@ -518,7 +543,7 @@
     },
     "/api/v2/audit-events": {
       "get": {
-        "summary": "Recent audit events",
+        "summary": "Audit events, newest first, with filters and paging",
         "responses": {
           "200": {
             "description": "Success"
@@ -526,7 +551,56 @@
           "401": {
             "description": "Invalid credential"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stored",
+                "rejected",
+                "deleted_versions",
+                "reconciled",
+                "reconcile_failed",
+                "conflict",
+                "invalid_existing",
+                "login"
+              ]
+            }
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "operator",
+                "sync-token",
+                "startup",
+                "limit"
+              ]
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Only events older than this event id"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ]
       }
     },
     "/api/v2/sync-runs": {

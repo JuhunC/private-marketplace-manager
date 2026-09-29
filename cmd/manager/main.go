@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -30,6 +31,26 @@ func secret(k string) (string, error) {
 		return strings.TrimSpace(string(b)), e
 	}
 	return os.Getenv(k), nil
+}
+
+// trustedProxies parses comma-separated addresses or CIDR ranges of reverse proxies.
+func trustedProxies(list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, item := range strings.Split(list, ",") {
+		if item = strings.TrimSpace(item); item == "" {
+			continue
+		}
+		p, e := netip.ParsePrefix(item)
+		if e != nil {
+			a, err := netip.ParseAddr(item)
+			if err != nil {
+				return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q: use addresses or CIDR ranges", item)
+			}
+			p = netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen())
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 func run() error {
 	version := flag.Bool("version", false, "print version")
@@ -64,7 +85,11 @@ func run() error {
 	if e != nil || max <= 0 {
 		return fmt.Errorf("invalid MAX_UPLOAD_BYTES")
 	}
-	s, e := server.New(server.Config{Extensions: env("EXTENSIONS_DIR", "/data/extensions"), State: env("STATE_DIR", "/data/state"), Token: token, Password: password, PublicURL: env("PUBLIC_URL", "http://localhost:8080"), MaxUpload: max})
+	proxies, e := trustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	if e != nil {
+		return e
+	}
+	s, e := server.New(server.Config{Extensions: env("EXTENSIONS_DIR", "/data/extensions"), State: env("STATE_DIR", "/data/state"), Token: token, Password: password, PublicURL: env("PUBLIC_URL", "http://localhost:8080"), MaxUpload: max, TrustedProxies: proxies})
 	if e != nil {
 		return e
 	}

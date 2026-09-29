@@ -50,7 +50,7 @@ Successful response:
 }
 ```
 
-`201` means newly stored; `200` means the identical package already exists. Both are synchronous durable acknowledgements. No `202`/background-upload polling is required. If the connection fails after publication, retry the same bytes/key. The manager verifies the existing file and returns its receipt. An idempotency key cannot be reused for another identity/hash.
+`201` means newly stored; `200` means the identical package already exists. Both are synchronous durable acknowledgements. No `202`/background-upload polling is required. If the connection fails after publication, retry the same bytes/key. The manager verifies the existing file and returns its receipt. An idempotency key cannot be reused for another identity/hash. When a new version pushes older ones past the extension's version limit, the `201` response lists them in `removedVersions`.
 
 ## Endpoints
 
@@ -60,15 +60,15 @@ Successful response:
 | `GET /limit` | The library's version limit `keep` (0 keeps every version) and `extensionLimits`, the extensions with their own |
 | `PUT /limit` | Set the library limit: `{"keep":5}`; add `"dryRun":true` for a preview. Extensions following it are trimmed to their newest 5 versions |
 | `PUT /catalog/{id}/limit` | Set one extension's limit: `{"keep":3}`, `{"keep":0}` to keep every version, or `{"keep":null}` to follow the library default; `"dryRun":true` previews |
-| `GET /catalog?q=python&sort=versions&attention=true&limit=100&offset=0` | One entry per extension: latest version, version/platform/package counts, stored bytes, last update, status counts, and its version limit (`keep`, `keepSource` of `library` or `extension`). `q` matches part of an ID or display name; `sort` is `name`, `versions`, `size`, or `updated`; `attention=true` keeps extensions with missing, pending, or conflicting records |
+| `GET /catalog?q=python&sort=versions&attention=true&pageSize=100&offset=0` | One entry per extension: latest version, version/platform/package counts, stored bytes, last update, status counts, and its version limit (`keep`, `keepSource` of `library` or `extension`). `q` matches part of an ID or display name; `sort` is `name`, `versions`, `size`, or `updated`; `attention=true` keeps extensions with missing, pending, or conflicting records |
 | `POST /catalog/{id}/delete` | Delete versions from disk: `{"through":"1.5.1"}` removes the earliest version through 1.5.1 (semantic order, inclusive) and `{"all":true}` every version. Add `"dryRun":true` for a preview. The response lists `versions`, `packages`, freed `bytes`, and `filesRemaining` |
 | `GET /catalog/{id}` | One extension's summary plus its versions, newest first by semantic version, each with its platform packages |
-| `GET /extensions?limit=100&offset=0&id=publisher.extension` | Inventory, exact ID filter, max page size 500 |
+| `GET /extensions?pageSize=100&offset=0&id=publisher.extension` | Inventory, exact ID filter, max page size 500 |
 | `POST /extensions/check` | Lookup up to 1,000 package keys; only stored regular files of the expected size are returned |
 | `POST /extensions` | Raw-byte VSIX upload |
 | `GET /packages/download?key=publisher.extension@1.2.3@linux-arm64` | Download original package bytes |
 | `GET /uploads/by-key/{key}` | Stored receipt for a successful idempotency key |
-| `GET /audit-events` | Latest 100 audit events |
+| `GET /audit-events?action=stored&actor=operator&pageSize=100&before=<id>` | Audit events, newest first. Filter by `action` (`stored`, `rejected`, `deleted_versions`, `reconciled`, `reconcile_failed`, `conflict`, `invalid_existing`, `login`) or `actor` (`operator`, `sync-token`, `startup`, `limit`); page with `before`, the last `id` received. Default page size 100, at most 500 |
 | `POST /sync-runs` | Save/update a JSON report with a run `id`; max 4 MiB |
 | `GET /sync-runs` | Latest 100 client-reported runs |
 | `POST /admin/reconcile?verify=full` | Rescan storage, recover pending records, inventory valid external files, and mark absent records missing. Without `verify=full`, files whose size and modification time are unchanged are trusted |
@@ -117,13 +117,16 @@ After every start the manager scans and hashes the VSIX directory in the backgro
 
 ## Errors and retry policy
 
-Errors contain `code`, `error`, and `requestId`:
+`pageSize` sets the page size of `GET /catalog`, `GET /extensions`, and `GET /audit-events`. The older `limit` query parameter is still accepted as a deprecated alias; it is unrelated to version limits. List responses report both `pageSize` and `limit`.
+
+Errors contain `code`, `error`, and `requestId`, including for API paths that do not exist (404 `not_found`) and methods an endpoint does not serve (405 `method_not_allowed`, with an `Allow` header):
 
 | HTTP | Meaning | Action |
 |---|---|---|
 | 400 | Invalid request/identifier/key | Fix input |
 | 401/403 | Authentication or browser origin/CSRF failure | Fix credential/origin; do not retry blindly |
-| 404 | Package/receipt unavailable | Reconcile or retry the original upload |
+| 404 | Package/receipt unavailable, or no API endpoint at the path | Reconcile or retry the original upload; check the path against `/openapi.json` |
+| 405 `method_not_allowed` | The endpoint does not serve this method | Use a method from the `Allow` header |
 | 409 | Different bytes at same identity, reused key, publication conflict, or `retention` (older than the version limit) | Investigate; never overwrite automatically. Raise the limit to accept an older version |
 | 410 `api_version` | An API v1 path | Update the client to API v2 |
 | 413 | Upload/body exceeds limit | Review size limits |

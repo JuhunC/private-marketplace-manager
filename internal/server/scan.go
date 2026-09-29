@@ -81,7 +81,7 @@ func (s *Server) reconcileStorage(full bool, progress func(done, total int)) (in
 			break
 		}
 		var n int
-		n, e = s.trim(id)
+		_, n, e = s.trim(id)
 		sc.changed += n
 	}
 	if e == nil {

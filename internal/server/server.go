@@ -17,10 +17,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +39,8 @@ var web embed.FS
 type Config struct {
 	Extensions, State, Token, Password, PublicURL string
 	MaxUpload                                     int64
+	// TrustedProxies are reverse proxies whose X-Forwarded-For names the real client, for login throttling.
+	TrustedProxies []netip.Prefix
 }
 type session struct {
 	CSRF  string
@@ -165,6 +167,10 @@ func (s *Server) Start() {
 			slog.Error("inventory scan failed; inventory endpoints stay unavailable until a reconcile succeeds", "error", e)
 			return
 		}
+		// Summarize what the scan changed now, so the first catalog view does not wait for it.
+		if e := s.db.RefreshSummaries(); e != nil {
+			slog.Warn("extension summaries could not be refreshed; the next catalog request retries", "error", e)
+		}
 		slog.Info("inventory scan finished", "files", s.scanState().Total, "duration", time.Since(started).Round(time.Millisecond).String())
 	})
 }
@@ -199,9 +205,35 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("X-Request-ID", randomID())
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
+			// API clients get JSON errors, not the router's or file server's plain-text pages.
+			if _, pattern := s.mux.Handler(r); pattern == "" || pattern == "GET /" {
+				if allowed := s.apiMethods(r); len(allowed) > 0 {
+					w.Header().Set("Allow", strings.Join(allowed, ", "))
+					fail(w, 405, "method_not_allowed", "use "+strings.Join(allowed, ", ")+" for this path")
+				} else {
+					fail(w, 404, "not_found", "no API endpoint at this path; see /openapi.json")
+				}
+				return
+			}
 		}
 		s.mux.ServeHTTP(w, r)
 	})
+}
+
+// apiMethods lists the methods an API endpoint serves at r's path, ignoring the web file server.
+func (s *Server) apiMethods(r *http.Request) []string {
+	var allowed []string
+	for _, method := range []string{"GET", "POST", "PUT", "DELETE"} {
+		probe := r.Clone(r.Context())
+		probe.Method = method
+		if _, pattern := s.mux.Handler(probe); pattern != "" && pattern != "GET /" {
+			allowed = append(allowed, method)
+			if method == "GET" {
+				allowed = append(allowed, "HEAD")
+			}
+		}
+	}
+	return allowed
 }
 func randomID() string {
 	b := make([]byte, 32)
@@ -256,17 +288,20 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /", http.FileServer(http.FS(sub)))
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	if e := s.db.DB.PingContext(r.Context()); e != nil {
+	if e := s.db.R.PingContext(r.Context()); e != nil {
 		fail(w, 503, "not_ready", "database unavailable")
 		return
 	}
-	f, e := os.CreateTemp(s.cfg.Extensions, ".ready-*.part")
-	if e != nil {
-		fail(w, 503, "not_ready", "extension storage is not writable")
-		return
+	// Reads use their own connections, so also prove both volumes still accept writes.
+	for _, place := range []struct{ dir, what string }{{s.cfg.Extensions, "extension storage"}, {s.cfg.State, "state storage"}} {
+		f, e := os.CreateTemp(place.dir, ".ready-*.part")
+		if e != nil {
+			fail(w, 503, "not_ready", place.what+" is not writable")
+			return
+		}
+		f.Close()
+		os.Remove(f.Name())
 	}
-	f.Close()
-	os.Remove(f.Name())
 	switch s.scanState().State {
 	case scanFailed:
 		fail(w, 503, "not_ready", "inventory scan failed; see manager logs")
@@ -333,7 +368,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "origin", "invalid login origin; check PUBLIC_URL")
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := s.clientIP(r)
 	s.mu.Lock()
 	a := s.attempts[ip]
 	if time.Now().After(a.Until) {
@@ -386,6 +421,46 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.Audit("operator", "login", "")
 	jsonResponse(w, 200, map[string]string{"csrfToken": csrf})
 }
+
+// clientIP is the connecting address, or, when that is a trusted reverse proxy, the nearest address in
+// X-Forwarded-For that is not itself a trusted proxy.
+func (s *Server) clientIP(r *http.Request) string {
+	trusted := func(a netip.Addr) bool {
+		for _, p := range s.cfg.TrustedProxies {
+			if p.Contains(a.Unmap()) {
+				return true
+			}
+		}
+		return false
+	}
+	peer, e := netip.ParseAddrPort(r.RemoteAddr)
+	if e != nil {
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		return host
+	}
+	client := peer.Addr().Unmap()
+	if !trusted(client) {
+		return client.String()
+	}
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		entry := strings.TrimSpace(hops[i])
+		hop, e := netip.ParseAddr(entry)
+		if e != nil {
+			// Some proxies record "address:port".
+			withPort, err := netip.ParseAddrPort(entry)
+			if err != nil {
+				break
+			}
+			hop = withPort.Addr()
+		}
+		client = hop.Unmap()
+		if !trusted(client) {
+			break
+		}
+	}
+	return client.String()
+}
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	csrf := ""
 	if c, e := r.Cookie("marketplace_session"); e == nil {
@@ -411,10 +486,15 @@ func actor(r *http.Request) string {
 	return "operator"
 }
 
-// page reads limit (default 100, at most 500) and offset query parameters.
+// page reads pageSize (default 100, at most 500) and offset query parameters. limit is a deprecated
+// alias of pageSize, easily confused with the version limit.
 func page(r *http.Request) (limit, offset int) {
-	limit, _ = strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ = strconv.Atoi(r.URL.Query().Get("offset"))
+	q := r.URL.Query()
+	limit, _ = strconv.Atoi(q.Get("pageSize"))
+	if limit <= 0 {
+		limit, _ = strconv.Atoi(q.Get("limit"))
+	}
+	offset, _ = strconv.Atoi(q.Get("offset"))
 	if limit <= 0 {
 		limit = 100
 	}
@@ -433,7 +513,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "database", "inventory unavailable")
 		return
 	}
-	jsonResponse(w, 200, map[string]any{"packages": p, "total": total, "limit": limit, "offset": offset})
+	jsonResponse(w, 200, map[string]any{"packages": p, "total": total, "pageSize": limit, "limit": limit, "offset": offset})
 }
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -449,7 +529,7 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "database", "catalog unavailable")
 		return
 	}
-	jsonResponse(w, 200, map[string]any{"extensions": x, "total": total, "limit": limit, "offset": offset})
+	jsonResponse(w, 200, map[string]any{"extensions": x, "total": total, "pageSize": limit, "limit": limit, "offset": offset})
 }
 
 // versionGroup collects the platform packages published for one extension version.
@@ -529,7 +609,11 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, map[string]any{"packages": out, "deleted": deleted, "limits": limits})
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	t, _ := s.db.Totals()
+	t, e := s.db.Totals()
+	if e != nil {
+		fail(w, 500, "database", "inventory totals unavailable")
+		return
+	}
 	jsonResponse(w, 200, map[string]any{"version": buildinfo.Version, "extensions": t.Extensions, "versions": t.Versions, "packages": t.Packages, "bytes": t.Bytes, "attention": t.Attention, "deleted": t.Deleted, "deletedBytes": t.DeletedBytes, "maxUploadBytes": s.cfg.MaxUpload, "marketplaceVisibility": "unverified", "apiVersion": 2, "inventory": s.scanState(), "storage": s.storage(), "limit": s.libraryKeep()})
 }
 func (s *Server) libraryKeep() map[string]int {
@@ -537,7 +621,10 @@ func (s *Server) libraryKeep() map[string]int {
 	return map[string]int{"keep": keep}
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	v, e := s.db.Events()
+	q := r.URL.Query()
+	pageSize, _ := page(r)
+	before, _ := strconv.ParseInt(q.Get("before"), 10, 64)
+	v, e := s.db.Events(q.Get("action"), q.Get("actor"), max(before, 0), pageSize)
 	if e != nil {
 		fail(w, 500, "database", "audit unavailable")
 		return
@@ -779,11 +866,16 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = s.db.Audit(actor(r), "stored", p.Key())
-	// A newer version can push the oldest past the limit.
-	if _, e = s.trim(strings.ToLower(p.ID)); e != nil {
+	// A newer version can push the oldest past the limit; the response says which versions left.
+	removed, _, e := s.trim(strings.ToLower(p.ID))
+	if e != nil {
 		slog.Warn("version limit could not be applied after an upload; it applies at the next upload or limit change", "extension", p.ID, "error", e)
 	}
-	jsonResponse(w, 201, map[string]any{"package": p, "duplicate": false})
+	result := map[string]any{"package": p, "duplicate": false}
+	if len(removed) > 0 {
+		result["removedVersions"] = removed
+	}
+	jsonResponse(w, 201, result)
 }
 
 // deleteVersions removes the files of an extension's versions from the earliest through a given version,
@@ -815,7 +907,6 @@ func (s *Server) deleteVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var targets []vsix.Package
-	var versions []string
 	var bytes int64
 	for _, p := range packages {
 		if p.Status != "deleted" && (req.All || vsix.CompareVersions(p.Version, req.Through) <= 0) {
@@ -823,12 +914,9 @@ func (s *Server) deleteVersions(w http.ResponseWriter, r *http.Request) {
 			if p.Status == "stored" {
 				bytes += p.Size
 			}
-			if !slices.Contains(versions, p.Version) {
-				versions = append(versions, p.Version)
-			}
 		}
 	}
-	slices.SortFunc(versions, vsix.CompareVersions)
+	versions := versionsOf(targets)
 	result := map[string]any{"dryRun": req.DryRun, "versions": versions, "packages": len(targets), "bytes": bytes}
 	if req.DryRun || len(targets) == 0 {
 		jsonResponse(w, 200, result)

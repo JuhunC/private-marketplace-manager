@@ -116,7 +116,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 		if in.Limit < 1 || in.Limit > 500 || in.Offset < 0 {
 			return nil, nil, fmt.Errorf("limit must be 1..500 and offset must be non-negative")
 		}
-		q := url.Values{"limit": {fmt.Sprint(in.Limit)}, "offset": {fmt.Sprint(in.Offset)}}
+		q := url.Values{"pageSize": {fmt.Sprint(in.Limit)}, "offset": {fmt.Sprint(in.Offset)}}
 		if in.ID != "" {
 			q.Set("id", strings.ToLower(in.ID))
 		}
@@ -187,7 +187,7 @@ func New(api *adminapi.Client, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "manager_upload_vsix", Title: "Upload or restore a VSIX", Annotations: additive("Upload or restore a VSIX"),
-		Description: "Validate one local VSIX and upload it idempotently. This can restore a missing or deleted package within the extension's version limit; it never replaces different bytes for the same extension, version, and platform.",
+		Description: "Validate one local VSIX and upload it idempotently. This can restore a missing or deleted package within the extension's version limit; it never replaces different bytes for the same extension, version, and platform. The result lists any older versions the version limit removed.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UploadInput) (*mcp.CallToolResult, any, error) {
 		if strings.TrimSpace(in.Path) == "" {
 			return nil, nil, fmt.Errorf("path is required")
@@ -252,7 +252,7 @@ func analyze(ctx context.Context, api *adminapi.Client) Analysis {
 			Packages []vsix.Package `json:"packages"`
 			Total    int            `json:"total"`
 		}
-		path := fmt.Sprintf("/api/v2/extensions?limit=500&offset=%d", offset)
+		path := fmt.Sprintf("/api/v2/extensions?pageSize=500&offset=%d", offset)
 		if e := api.JSON(ctx, http.MethodGet, path, nil, &page); e != nil {
 			out.Healthy = false
 			addFinding(Finding{Severity: "critical", Code: "inventory_unavailable", Summary: "Inventory could not be read", Evidence: e.Error()})

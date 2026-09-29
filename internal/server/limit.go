@@ -52,15 +52,22 @@ func (s *Server) remove(targets []vsix.Package, by, detail string) (int, error) 
 	return remaining, nil
 }
 
-// kept lists an extension's versions that are not deleted, newest first.
-func kept(packages []vsix.Package) []string {
+// versionsOf lists the distinct versions of packages, oldest first.
+func versionsOf(packages []vsix.Package) []string {
 	var versions []string
 	for _, p := range packages {
-		if p.Status != "deleted" && !slices.Contains(versions, p.Version) {
+		if !slices.Contains(versions, p.Version) {
 			versions = append(versions, p.Version)
 		}
 	}
-	slices.SortFunc(versions, func(a, b string) int { return vsix.CompareVersions(b, a) })
+	slices.SortFunc(versions, vsix.CompareVersions)
+	return versions
+}
+
+// kept lists an extension's versions that are not deleted, newest first.
+func kept(packages []vsix.Package) []string {
+	versions := versionsOf(slices.DeleteFunc(slices.Clone(packages), func(p vsix.Package) bool { return p.Status == "deleted" }))
+	slices.Reverse(versions)
 	return versions
 }
 
@@ -98,25 +105,26 @@ func outside(packages []vsix.Package, version string, keep int) bool {
 	return newer >= keep
 }
 
-// trim deletes an extension's versions beyond its limit. Callers hold publishMu.
-func (s *Server) trim(id string) (int, error) {
+// trim deletes an extension's versions beyond its limit, reporting the versions and packages removed.
+// Callers hold publishMu.
+func (s *Server) trim(id string) ([]string, int, error) {
 	keep, _, e := s.db.Keep(id)
 	if e != nil || keep == 0 {
-		return 0, e
+		return nil, 0, e
 	}
 	packages, _, e := s.db.List(id, 2147483647, 0)
 	if e != nil {
-		return 0, e
+		return nil, 0, e
 	}
 	targets := beyond(packages, keep)
 	if len(targets) == 0 {
-		return 0, nil
+		return nil, 0, nil
 	}
 	detail, _ := json.Marshal(map[string]any{"id": id, "keep": keep, "packages": len(targets)})
 	if _, e = s.remove(targets, "limit", string(detail)); e != nil {
-		return 0, e
+		return nil, 0, e
 	}
-	return len(targets), nil
+	return versionsOf(targets), len(targets), nil
 }
 
 // trimmed summarizes what a version limit removes.
@@ -134,16 +142,12 @@ func (t *trimmed) add(targets []vsix.Package) {
 		return
 	}
 	t.Extensions++
-	var versions []string
 	for _, p := range targets {
-		if !slices.Contains(versions, p.Version) {
-			versions = append(versions, p.Version)
-		}
 		if p.Status == "stored" {
 			t.Bytes += p.Size
 		}
 	}
-	t.Versions += len(versions)
+	t.Versions += len(versionsOf(targets))
 	t.Packages += len(targets)
 }
 
@@ -187,22 +191,18 @@ func (s *Server) setLibraryLimit(w http.ResponseWriter, r *http.Request) {
 	defer s.maintenance.RUnlock()
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
-	overrides, e := s.db.Overrides()
-	if e != nil {
-		fail(w, 500, "database", "limits unavailable")
-		return
-	}
 	if !req.DryRun {
-		if e = s.db.SetKeepDefault(*req.Keep); e != nil {
+		if e := s.db.SetKeepDefault(*req.Keep); e != nil {
 			fail(w, 500, "database", "limit could not be saved")
 			return
 		}
 	}
 	var t trimmed
-	e = s.db.Extensions(func(id string, packages []vsix.Package) error {
-		if _, own := overrides[id]; own {
-			return nil
-		}
+	if *req.Keep == 0 {
+		jsonResponse(w, 200, map[string]any{"dryRun": req.DryRun, "keep": 0, "trimmed": t})
+		return
+	}
+	e := s.db.ExtensionsOver(*req.Keep, func(id string, packages []vsix.Package) error {
 		targets := beyond(packages, *req.Keep)
 		t.add(targets)
 		if req.DryRun || len(targets) == 0 {
@@ -252,12 +252,7 @@ func (s *Server) setExtensionLimit(w http.ResponseWriter, r *http.Request) {
 	targets := beyond(packages, keep)
 	var t trimmed
 	t.add(targets)
-	for _, p := range targets {
-		if !slices.Contains(t.Removed, p.Version) {
-			t.Removed = append(t.Removed, p.Version)
-		}
-	}
-	slices.SortFunc(t.Removed, vsix.CompareVersions)
+	t.Removed = versionsOf(targets)
 	if !req.DryRun {
 		if e = s.db.SetKeep(id, req.Keep); e != nil {
 			fail(w, 500, "database", "limit could not be saved")
